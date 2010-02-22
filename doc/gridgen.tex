@@ -1,0 +1,165 @@
+%% Manual for grid generator
+
+\documentclass[12pt, a4paper]{article}
+\usepackage[nofoot]{geometry}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{amsfonts}
+
+%% Modify margins
+\addtolength{\oddsidemargin}{-.25in}
+\addtolength{\evensidemargin}{-.25in}
+\addtolength{\textwidth}{0.5in}
+\addtolength{\textheight}{0.25in}
+%% SET HEADERS AND FOOTERS
+
+\pagestyle{fancy}
+\fancyfoot{}
+\renewcommand{\sectionmark}[1]{         % Lower case Section marker style
+  \markright{\thesection.\ #1}}
+\fancyhead[LE,RO]{\bfseries\thepage}    % Page number (boldface) in left on even
+                                        % pages and right on odd pages 
+\renewcommand{\headrulewidth}{0.3pt}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{\bf #1}}
+
+%% commands for boxes with important notes
+\newlength{\notewidth}
+\addtolength{\notewidth}{\textwidth}
+\addtolength{\notewidth}{-3.\parindent}
+\newcommand{\note}[1]{
+\fbox{
+\begin{minipage}{\notewidth}
+{\bf NOTE}: #1
+\end{minipage}
+}}
+
+\newcommand{\pow}{\ensuremath{\wedge} }
+\newcommand{\poweq}{\ensuremath{\wedge =} }
+
+\newcommand{\deriv}[2]{\ensuremath{\frac{\partial #1}{\partial #2}}}
+\newcommand{\dderiv}[2]{\ensuremath{\frac{\partial^2 #1}{\partial {#2}^2}}}
+\newcommand{\Vpar}{\ensuremath{V_{||}}}
+\newcommand{\Gradpar}{\ensuremath{\partial_{||}}}
+\newcommand{\Divpar}{\ensuremath{\nabla_{||}}}
+\newcommand{\DivXgradX}[2]{\ensuremath{\nabla_\psi\left(#1\partial_\psi #2\right)}}
+\newcommand{\DivParGradPar}[2]{\ensuremath{\nabla_{||}\left(#1\partial_{||} #2\right)}}
+
+\newcommand{\apar}{\ensuremath{A_{||}}}
+\newcommand{\hthe}{\ensuremath{h_\theta}}
+\newcommand{\Bp}{\ensuremath{B_\theta}}
+\newcommand{\Bt}{\ensuremath{B_\zeta}}
+
+\newcommand{\Vec}[1]{\ensuremath{\mathbf{#1}}}
+\newcommand{\bvec}{\Vec{b}}
+\newcommand{\kvec}{\Vec{\kappa}}
+\newcommand{\vvec}{\Vec{v}}
+\newcommand{\bxk}{\bvec_0\times\kvec_0\cdot\nabla}
+\newcommand{\Bvec}{\Vec{B}}
+\newcommand{\Bbar}{\overline{B}}
+\newcommand{\Lbar}{\overline{L}}
+\newcommand{\Tbar}{\overline{T}}
+\newcommand{\Jvec}{\Vec{J}}
+\newcommand{\Jpar}{J_{||}}
+\newcommand{\delp}{\nabla_\perp^2}
+\newcommand{\Div}[1]{\ensuremath{\nabla\cdot #1 }}
+\newcommand{\Curl}[1]{\ensuremath{\nabla\times #1 }}
+\newcommand{\rbp}{\ensuremath{R\Bp}}
+\newcommand{\rbpsq}{\ensuremath{\left(\rbp\right)^2}}
+
+\begin{document}
+
+\title{Tokamak grid generator in IDL}
+\author{B.Dudson\dag, M.V.Umansky\ddag \\
+\dag University of York \\
+\ddag Lawrence Livermore National Laboratory}
+
+\maketitle
+
+\tableofcontents
+
+\section{Using the grid generator}
+
+The function \code{create\_grid} takes a 2D array of $\psi$ values, and 
+produces an orthogonal mesh aligned with the flux-surfaces.
+
+Settings to control the resulting mesh are:
+\begin{itemize}
+\item \code{psi\_inner}, the normalised $\psi$ of the innermost flux surface. 
+  This can be either a scalar or an array:
+  \begin{itemize}
+    \item \code{{\bf scalar}}: This value is used for the core and all PF regions
+    \item \code{{\bf array[0]}}: The inner normalised $\psi$ for the core
+    \item \code{{\bf array[1..n\_xpoint]}}: Inner $\psi$ to use for each PF region
+      (see section~\ref{sec:numbering})
+  \end{itemize}
+\item \code{psi\_outer}, normalised $\psi$ of outermost surface. Can also be
+  either a scalar or array:
+  \begin{itemize}
+  \item \code{{\bf scalar}}: This value is used for the core and all PF regions
+  \item \code{{\bf array[0..(n\_xpoint-1)]}}: Outer normalised $\psi$ for each SOL region
+    (one per x-point)
+  \end{itemize}
+\item \code{nrad} Number of radial grid points
+  \begin{itemize}
+  \item \code{{\bf scalar}}: Total number of radial grid points. Automatically divides this
+    between regions.
+  \item \code{{\bf array[0]}}: Number of radial grid points in the core
+  \item \code{{\bf array[1..(n\_xpoint-1)]}}: Radial grid points between separatrices
+    (going outwards from core to edge)
+  \item \code{{\bf array[n\_xpoint]}}: Radial grid points outside last separatrix
+  \end{itemize}
+\item \code{npol} Number of poloidal grid points.
+  \begin{itemize}
+  \item \code{{\bf scalar}}: Total number of points. Divides between regions based on
+    poloidal arc lengths
+  \item \code{{\bf array[0..(3*n\_xpoint-1)]}}: Number of points in each poloidal region. 
+    See section~\ref{sec:numbering} for numbering scheme.
+  \end{itemize}
+\item \code{rad\_peaking}
+\item \code{pol\_peaking}
+\end{itemize}
+
+\section{DCT}
+
+DCT of 2D NxM $f\left(x,y\right)$
+\[
+F\left(u, v\right) = \sqrt{\frac{2}{N}}\sqrt{\frac{2}{M}}\Lambda\left(u\right)\Lambda\left(v\right)\sum_{i=0}^{N-1}\sum_{j=0}^{M-1} f\left(i, j\right) \cos\left[\frac{\pi u}{2N}\left(2i+1\right)\right]\cos\left[\frac{\pi v}{2M}\left(2j+1\right)\right]
+\]
+where $\Lambda\left(i\right) = 1/\sqrt{2}$ for $i=0$, and $\Lambda\left(i\right) = 1$ otherwise
+ 
+\section{Finding critical points}
+
+To find x- and o-points, 
+
+\section{Region numbering}
+\label{sec:numbering}
+
+
+\section{Separatrices}
+
+Having found the x-point locations, the separatrices need to be found.
+First step is to calculate the lines going through the x-point:
+
+Close to an x-point, approximate the change in $\psi$ by
+\[
+\delta\psi = \frac{1}{2}\psi_{xx} x^2 + \frac{1}{2}\psi_{yy}y^2 + \psi_{xy} xy
+\]
+
+The two lines through the x-point are then given by where this is zero:
+
+\[
+\frac{1}{2}\psi_{yy}y^2 + \psi_{xy}xy + \frac{1}{2}\psi_{xx} x^2 = 0
+\]
+Which has the solution
+\[
+y = \frac{ -\psi_{xy}x \pm \sqrt{\psi_{xy}^2x^2 - \psi_{yy}\psi_{xx}x^2}}{\psi_{yy}}
+\]
+i.e.
+\[
+y = \frac{1}{\psi_{yy}}\left(-\psi_{xy} \pm \sqrt{\psi_{xy}^2 - \psi_{yy}\psi_{xx}}\right)x
+\]
+Note that if $\psi_{yy} = 0$ then the solutions are $x = 0$ and $y = -\frac{\psi_{xx}}{2\psi_{xy}}x$
+
+\end{document}
