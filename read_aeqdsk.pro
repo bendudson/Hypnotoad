@@ -1,3 +1,13 @@
+; IDL routine to read an 'a' file aeqdsk
+;
+; Example:
+;   a = read_aeqdsk("aeqdsk")
+;
+; Format of A-EQDSK file is specified here:
+;   https://fusion.gat.com/THEORY/efit/a_eqdsk.html
+; 
+; Ben Dudson, University of York, Feb 2010
+;
 
 FUNCTION read_aeqdsk, file
   OPENR, fid, file, /GET_LUN, error=errid

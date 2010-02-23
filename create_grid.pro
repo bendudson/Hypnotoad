@@ -1299,7 +1299,7 @@ END
 ;
 
 FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
-                      boundary=boundary, debug=debug, strictbndry=strictbndry
+                      boundary=boundary, debug=debug, strictbndry=strictbndry, iter=iter
 
   ; Create error handler
   err=0;CATCH, err
@@ -1307,6 +1307,12 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
     PRINT, "CREATE_GRID failed"
     PRINT, "   Error message: "+!ERROR_STATE.MSG
     CATCH, /cancel
+    RETURN, {error:1}
+  ENDIF
+
+  IF NOT KEYWORD_SET(iter) THEN iter = 0
+  IF iter GT 3 THEN BEGIN
+    PRINT, "ERROR: Too many iterations"
     RETURN, {error:1}
   ENDIF
 
@@ -1378,7 +1384,12 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
   levels = findgen(nlev)*(maxf-minf)/FLOAT(nlev-1) + minf
 
   safe_colors, /first
-  CONTOUR, F, R, Z, levels=levels, color=1, /iso
+  CONTOUR, F, R, Z, levels=levels, color=1, /iso, xstyl=1, ysty=1
+  
+  IF KEYWORD_SET(boundary) THEN BEGIN
+    OPLOT, [REFORM(boundary[0,*]), boundary[0,0]], [REFORM(boundary[1,*]), boundary[1,0]], $
+           thick=2,color=2
+  ENDIF
 
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
   ; Analyse the equilibrium to find O- and X-points
@@ -1729,11 +1740,19 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
       IF xpt_psi_max GT psi_outer[solid] THEN BEGIN
         PRINT, "**Far SOL cannot include both x-points"
         PRINT, " Probably caused by intersection with boundaries."
+        
         IF KEYWORD_SET(strictbndry) THEN BEGIN
           PRINT, "**Re-running, removing the strict keyword"
         ENDIF ELSE BEGIN
-          PRINT, "**Re-running, removing boundary"
-          boundary = 0
+          
+          IF N_ELEMENTS(boundary[0,*]) GT 4 THEN BEGIN
+            PRINT, "**Re-running, simplifying boundary"
+            boundary = TRANSPOSE([ [MIN(boundary[0,*]), MAX(boundary[0,*]), MAX(boundary[0,*]), MIN(boundary[0,*])], $
+                                   [MIN(boundary[1,*]), MIN(boundary[1,*]), MAX(boundary[1,*]), MAX(boundary[1,*])] ])
+          ENDIF ELSE BEGIN
+            PRINT, "**Re-running, removing boundary"
+            boundary = 0
+          ENDELSE
         ENDELSE
           
         IF nrad_flexible THEN nrad = TOTAL(nrad) ; Allow nrad to change again
@@ -1742,7 +1761,7 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
                         nrad:nrad, npol:settings.npol, $
                         rad_peaking:settings.rad_peaking, pol_peaking:settings.pol_peaking}
         RETURN, create_grid(F, R, Z, new_settings, critical=critical, $
-                            boundary=boundary)
+                            boundary=boundary, iter=iter+1)
       ENDIF
       sol_psi_vals[i,(TOTAL(nrad)-nsol):*] = radial_grid(nsol, $
                                                          xpt_psi_max, psi_outer[solid], $
@@ -1961,10 +1980,11 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
         IF KEYWORD_SET(strictbndry) THEN BEGIN
           PRINT, "** Switching off strict boundary"
           strictbndry = 0
-        ENDIF ELSE BEGIN
+        ENDIF ELSE IF rerun EQ 0 THEN BEGIN
+          ; Only if haven't already marked as restarting
           PRINT, "** Removing the boundary"
           boundary = 0
-        ENDELSE
+        ENDIF
         
         flast1 = faxis + fnorm*MAX(pf_psi_vals[xpt,0,*]) ; don't restrict range
         rerun = 1
@@ -2014,10 +2034,10 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
         IF KEYWORD_SET(strictbndry) THEN BEGIN
           PRINT, "** Switching off strict boundary"
           strictbndry = 0
-        ENDIF ELSE BEGIN
+        ENDIF ELSE IF rerun EQ 0 THEN BEGIN
           PRINT, "** Removing the boundary"
           boundary = 0
-        ENDELSE
+        ENDIF
         
         flast2 = faxis + fnorm*MAX(sol_psi_vals[solid,*]) ; don't restrict range
         rerun = 1
@@ -2051,10 +2071,10 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
         IF KEYWORD_SET(strictbndry) THEN BEGIN
           PRINT, "** Switching off strict boundary"
           strictbndry = 0
-        ENDIF ELSE BEGIN
+        ENDIF ELSE IF rerun EQ 0 THEN BEGIN
           PRINT, "** Removing the boundary"
           boundary = 0
-        ENDELSE
+        ENDIF
         
         flast2 = faxis + fnorm*MAX(pf_psi_vals[xpt,1,*]) ; don't restrict range
         rerun = 1
@@ -2105,7 +2125,7 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
       PRINT, "** Re-running grid generator with changed settings"
       PRINT, "psi outer = ", psi_outer
       RETURN, create_grid(F, R, Z, new_settings, critical=critical, $
-                          boundary=boundary, strictbndry=strictbndry)
+                          boundary=boundary, strictbndry=strictbndry, iter=iter+1)
       
     ENDIF
     

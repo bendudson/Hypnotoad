@@ -1,8 +1,23 @@
 ; IDL routine to read a 'g' file neqdsk
 ;
+; Example:
+;   g = read_neqdsk("neqdsk")
+; 
+; See comments at end for meaning of structure elements
 ;
+; Format of G-EQDSK file is specified here:
+;   https://fusion.gat.com/THEORY/efit/g_eqdsk.html
+; 
+; Ben Dudson, University of York, Feb 2010
 
 FUNCTION read_neqdsk, file
+  CATCH, theError
+  IF theError THEN BEGIN
+    CATCH, /cancel
+    PRINT, "ERROR Occurred whilst reading G-EQDSK file"
+    RETURN, 0
+  ENDIF
+  
   OPENR, fid, file, /GET_LUN, error=errid
   IF errid THEN BEGIN
     PRINT, "Error whilst reading '"+file+"' :" + !ERROR_STATE.MSG
@@ -112,5 +127,6 @@ FUNCTION read_neqdsk, file
             qpsi:qpsi, $  ; q values on uniform flux grid
             nbdry:nbdry, rbdry:rbdry, zbdry:zbdry, $  ; Plasma boundary
             nlim:nlim, xlim:xlim, ylim:ylim} ; Wall boundary
+  CATCH, /cancel
   RETURN, result
 END

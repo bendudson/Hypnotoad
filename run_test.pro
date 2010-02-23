@@ -10,7 +10,9 @@ boundary[1,*] = [-1.4, 1.4, 1.4, -1.4]
 
 ;boundary = TRANSPOSE([[g.xlim], [g.ylim]])
 
+; Find a field-aligned mesh
 mesh = create_grid(g.psi, R, Z, boundary=boundary, /strict)
 
-; Need to get pressure and f on this mesh
-;pressure = INTERPOL(g.pres, 
+; Create a grid from the mesh and g-file data
+grid = process_grid(g, mesh)
+
