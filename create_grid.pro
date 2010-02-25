@@ -19,7 +19,8 @@
 ; Useage:
 ; ------
 ; 
-; FUNCTION create_grid, F, R, Z, settings, critical=critical, boundary=boundary
+; FUNCTION create_grid, F, R, Z, settings, critical=critical,
+;                                boundary=boundary, fpsi=fpsi
 ;
 ; F - psi(nr, nz) 2D array
 ; R - R(nr)  1D array
@@ -64,6 +65,10 @@
 ;   boundary[0, *]       - R values
 ;   boundary[1, *]       - Z values
 ;
+; fpsi is an (optional) current function as a 2D array
+;   fpsi[0,*]            - Psi values
+;   fpsi[1,*]            - f values
+;
 ; Return structure contains:
 ; 
 ;   error                  - Non-zero if an error occurred
@@ -75,6 +80,29 @@
 ;   faxis, fnorm           - Psi normalisation factors
 ;   settings               - Final settings used
 ;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; 
+; radial grid
+;
+; n - number of grid points
+; pin, pout - range of psi
+; seps - locations of separatrices
+; sep_factor - separatrix peaking
+
+FUNCTION radial_grid, n, pin, pout, include_in, include_out, seps, sep_factor
+  x = FINDGEN(n)
+  m = FLOAT(n-1)
+  IF NOT include_in THEN BEGIN
+    x = x + 0.5
+    m = m + 0.5
+  ENDIF
+  
+  IF NOT include_out THEN m = m + 0.5
+  x = x / m
+
+  RETURN, pin + (pout - pin)*x
+END
 
 FUNCTION STR, val
   n = N_ELEMENTS(val)
@@ -191,8 +219,13 @@ FUNCTION line_crossings, r1, z1, period1, r2, z2, period2, ncross=ncross, $
       det = a*d - b*c
       
       ; Get location along the line segments
-      alpha = (d*dr - b*dz)/det
-      beta =  (a*dz - c*dr)/det
+      IF ABS(det) GT 1.e-6 THEN BEGIN
+        alpha = (d*dr - b*dz)/det
+        beta =  (a*dz - c*dr)/det
+      ENDIF ELSE BEGIN
+        alpha = -1.
+        beta = -1.
+      ENDELSE
       
       IF (alpha GE 0.0) AND (alpha LE 1.0) AND (beta GE 0.0) AND (beta LE 1.0) THEN BEGIN
         ; Intersection
@@ -249,6 +282,51 @@ FUNCTION local_gradient, dctF, ri, zi, status=status
   status = 0
 
   RETURN, {f:res[0], dfdr:res[1], dfdz:res[2]}
+END
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; 
+; Poloidal grid
+;
+; Divide up a poloidal arc
+;
+
+FUNCTION poloidal_grid, dctF, R, Z, ri, zi, n, fpsi=fpsi, parweight=parweight
+
+  IF NOT KEYWORD_SET(parweight) THEN parweight = 0.0
+  
+  np = N_ELEMENTS(ri)
+
+  ; Calculate poloidal distance along starting line
+  drdi = DERIV(INTERPOLATE(R, ri))
+  dzdi = DERIV(INTERPOLATE(Z, zi))
+
+
+  dldi = SQRT(drdi^2 + dzdi^2)
+  poldist = int_func(findgen(np), dldi) ; Poloidal distance along line
+
+  IF SIZE(fpsi, /dim) EQ 2 THEN BEGIN
+    ; Parallel distance along line
+    ; Need poloidal and toroidal field
+    ni = N_ELEMENTS(ri)
+    bp = FLTARR(ni)
+    bt = FLTARR(ni)
+    FOR i=0, ni-1 DO BEGIN
+      g = local_gradient(dctF, ri[i], zi[i], status=status)
+      bp[i] = SQRT(g.dfdr^2 + g.dfdz^2) / INTERPOLATE(R, ri[i])
+      bt[i] = INTEPOL(REFORM(fpsi[1,*]), REFORM(fpsi[0,*]), g.f)
+    ENDFOR
+  ENDIF ELSE pardist = poldist ; Just use the same poloidal distance
+
+  dist = parweight*pardist + (1. - parweight)*poldist
+
+  ; Divide up distance. No points at the end (could be x-point)
+  dloc = dist[np-1] * (FINDGEN(n)+0.5)/FLOAT(n)  ; Distance locations
+  
+  ; Get indices in ri, zi
+  ind = INTERPOL(FINDGEN(np), dist, dloc)
+  
+  RETURN, ind
 END
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -385,7 +463,8 @@ FUNCTION grid_region, dctF, R, Z, $
                       sfirst=sfirst, $
                       oplot=oplot, $
                       boundary=boundary, $
-                      ffirst=ffirst, flast=flast
+                      ffirst=ffirst, flast=flast, $
+                      fpsi=fpsi ; f(psi) = R*Bt optional current function
   
   nsurf = N_ELEMENTS(fvals)
   
@@ -418,22 +497,8 @@ FUNCTION grid_region, dctF, R, Z, $
   s = SIZE(dctF, /dimensions)
   nr = s[0]
   nz = s[1]
-  
-  np = N_ELEMENTS(ri)
 
-  ; Calculate distance along starting line
-  drdi = DERIV(INTERPOLATE(R, ri))
-  dzdi = DERIV(INTERPOLATE(Z, zi))
-  
-  dldi = SQRT(drdi^2 + dzdi^2)
-  dist = int_func(findgen(np), dldi) ; Distance along line
-  
-  ; Divide up distance. No points at the end (could be x-point)
-  dl = dist[np-1] / FLOAT(npar)
-  dloc = FINDGEN(npar)*dl + 0.5*dl ; Distance locations
-  
-  ; Get indices in ri, zi
-  ind = INTERPOL(FINDGEN(np), dist, dloc)
+  ind = poloidal_grid(dctF, R, Z, ri, zi, npar, fpsi=fpsi)
   
   rii = INTERPOLATE(ri, ind)
   zii = INTERPOLATE(zi, ind)
@@ -554,29 +619,6 @@ PRO oplot_line, dctF, R, Z, ri0, zi0, fto, npt=npt, color=color, _extra=_extra
       
   OPLOT, INTERPOLATE(R, rixpt), INTERPOLATE(Z, zixpt), $
     color=color, _extra=_extra
-END
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; 
-; radial grid
-;
-; n - number of grid points
-; pin, pout - range of psi
-; seps - locations of separatrices
-; sep_factor - separatrix peaking
-
-FUNCTION radial_grid, n, pin, pout, include_in, include_out, seps, sep_factor
-  x = FINDGEN(n)
-  m = FLOAT(n-1)
-  IF NOT include_in THEN BEGIN
-    x = x + 0.5
-    m = m + 0.5
-  ENDIF
-  
-  IF NOT include_out THEN m = m + 0.5
-  x = x / m
-
-  RETURN, pin + (pout - pin)*x
 END
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1281,7 +1323,8 @@ END
 ;
 
 FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
-                      boundary=boundary, debug=debug, strictbndry=strictbndry, iter=iter
+                      boundary=boundary, debug=debug, strictbndry=strictbndry, iter=iter, $
+                      fpsi = fpsi ; f(psi) = R*Bt current function
 
   ; Create error handler
   err=0;CATCH, err
@@ -1461,7 +1504,7 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
                     start_ri, start_zi, $
                     fvals, $
                     sind, $
-                    npol)
+                    npol, fpsi=fpsi)
     
     OPLOT, [REFORM(a.rxy[0,*]), a.rxy[0,0]], [REFORM(a.zxy[0,*]), a.zxy[0,0]], color=4
       
@@ -1952,7 +1995,7 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
                       sfirst=sfirst1, $
                       slast=slast1, $
                       boundary=gridbndry, $
-                      ffirst=ffirst, flast=flast1)
+                      ffirst=ffirst, flast=flast1, fpsi=fpsi)
       Rxy[*, ypos:(ypos+npol[3*i]-1)] = a.Rxy
       Zxy[*, ypos:(ypos+npol[3*i]-1)] = a.Zxy
       Rixy[*, ypos:(ypos+npol[3*i]-1)] = a.Rixy
@@ -2005,7 +2048,7 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
                       sfirst=sfirst2, $
                       slast=slast2, $
                       boundary=gridbndry, $
-                      ffirst=ffirst, flast=flast2)
+                      ffirst=ffirst, flast=flast2, fpsi=fpsi)
       Rxy[*, ypos:(ypos+npol[3*i+1]-1)] = a.Rxy
       Zxy[*, ypos:(ypos+npol[3*i+1]-1)] = a.Zxy
       Rixy[*, ypos:(ypos+npol[3*i+1]-1)] = a.Rixy
@@ -2041,7 +2084,7 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
                       sfirst=sfirst3, $
                       slast=slast3, $
                       boundary=gridbndry, $
-                      ffirst=ffirst, flast=flast3)
+                      ffirst=ffirst, flast=flast3, fpsi=fpsi)
       Rxy[*, ypos:(ypos+npol[3*i+2]-1)] = a.Rxy
       Zxy[*, ypos:(ypos+npol[3*i+2]-1)] = a.Zxy
       Rixy[*, ypos:(ypos+npol[3*i+2]-1)] = a.Rixy
@@ -2126,7 +2169,8 @@ FUNCTION create_grid, F, R, Z, in_settings, critical=critical, $
               Rxy:Rxy, Zxy:Zxy, $ ; Locations (not really necessary)
               psixy:psixy, $ ; Normalised psi for each point
               faxis:faxis, fnorm:fnorm, $ ; Psi normalisation factors
-              settings:new_settings} ; Settings used to create grid
+              settings:new_settings, $ ; Settings used to create grid
+              critical:critical}  ; Critical points
   ENDELSE
 
   CATCH, /cancel

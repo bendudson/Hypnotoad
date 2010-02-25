@@ -26,6 +26,27 @@ PRO plot_rz_equil, data
   CONTOUR, data.psi, data.r, data.z, /iso, nlev=40
 END
 
+
+PRO oplot_mesh, rz_mesh, flux_mesh
+  ; Plot X-points and separatrices
+  FOR i=0, flux_mesh.critical.n_xpoint-1 DO BEGIN
+    ; plot the separatrix contour
+    CONTOUR, rz_mesh.psi, rz_mesh.R, rz_mesh.Z, levels=[flux_mesh.critical.xpt_f[i]], c_colors=2, /overplot
+    oplot, [INTERPOLATE(rz_mesh.R, flux_mesh.critical.xpt_ri[i])], [INTERPOLATE(rz_mesh.Z, flux_mesh.critical.xpt_zi[i])], psym=7, color=2
+  ENDFOR
+
+  ; Plot O-points
+  FOR i=0, flux_mesh.critical.n_opoint-1 DO BEGIN
+    oplot, [INTERPOLATE(rz_mesh.R, flux_mesh.critical.opt_ri[i])], [INTERPOLATE(rz_mesh.Z, flux_mesh.critical.opt_zi[i])], psym=7, color=3
+  ENDFOR
+  
+  ypos = 0
+  FOR i=0, N_ELEMENTS(flux_mesh.npol)-1 DO BEGIN
+    plot_region, flux_mesh.rxy, flux_mesh.zxy, ypos, ypos+flux_mesh.npol[i]-1, color=i+1
+    ypos = ypos + flux_mesh.npol[i]
+  ENDFOR
+END
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Event handling procedure
 
@@ -113,14 +134,7 @@ PRO event_handler, event
       IF mesh.error EQ 0 THEN BEGIN
         PRINT, "Successfully generated mesh"
         WIDGET_CONTROL, info.status, set_value="Successfully generated mesh. All glory to the Hypnotoad!"
-        ypos = 0
-        FOR i=0, N_ELEMENTS(mesh.npol)-1 DO BEGIN
-          ;OPLOT, mesh.Rxy[*,ypos:(ypos+mesh.npol[i]-1)], $
-          ;       mesh.Zxy[*,ypos:(ypos+mesh.npol[i]-1)], psym=1
-          plot_region, mesh.rxy, mesh.zxy, ypos, ypos+mesh.npol[i]-1, color=i+1
-          ypos = ypos + mesh.npol[i]
-          ;CURSOR,x,y,/down
-        ENDFOR
+        oplot_mesh, *info.rz_grid, mesh
         
         info.flux_mesh_valid = 1
         info.flux_mesh = PTR_NEW(mesh)
@@ -175,14 +189,7 @@ PRO handle_resize, event
      IF info.flux_mesh_valid THEN BEGIN
        ; Overplot the mesh
        mesh = *info.flux_mesh
-       ypos = 0
-       FOR i=0, N_ELEMENTS(mesh.npol)-1 DO BEGIN
-         ;OPLOT, mesh.Rxy[*,ypos:(ypos+mesh.npol[i]-1)], $
-         ;       mesh.Zxy[*,ypos:(ypos+mesh.npol[i]-1)], psym=1
-         plot_region, mesh.rxy, mesh.zxy, ypos, ypos+mesh.npol[i]-1, color=i+1
-         ypos = ypos + mesh.npol[i]
-         ;CURSOR,x,y,/down
-       ENDFOR
+       oplot_mesh, *info.rz_grid, *info.flux_mesh
      ENDIF
   ENDIF
 
