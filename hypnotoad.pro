@@ -77,6 +77,8 @@ PRO event_handler, event
                    r:REFORM(g.r[*,0]), z:REFORM(g.z[0,*]), $  ; R and Z as 1D arrays
                    simagx:g.simagx, sibdry:g.sibdry, $ ; Range of psi
                    psi:g.psi, $  ; Poloidal flux in Weber/rad on grid points
+                   npsigrid:(FINDGEN(N_ELEMENTS(g.pres))/N_ELEMENTS(g.pres)), $ ; Normalised psi grid for fpol, pres and qpsi
+                   fpol:g.fpol, $ ; Poloidal current function on uniform flux grid
                    pres:g.pres, $ ; Plasma pressure in nt/m^2 on uniform flux grid
                    qpsi:g.qpsi, $ ; q values on uniform flux grid
                    nlim:g.nlim, rlim:g.xlim, zlim:g.ylim} ; Wall boundary
@@ -142,6 +144,23 @@ PRO event_handler, event
       ENDIF ELSE BEGIN
         a = DIALOG_MESSAGE("Could not generate mesh", /error)
         WIDGET_CONTROL, info.status, set_value="  *** FAILED to generate mesh ***"
+      ENDELSE
+    END
+    'process': BEGIN
+      ; Process mesh to produce output
+      PRINT, "Write output file"
+      filename = DIALOG_PICKFILE(dialog_parent=event.top, file="bout.grd.nc", $
+                                 /write, /overwrite_prompt)
+      
+      IF info.rz_grid_valid AND info.flux_mesh_valid THEN BEGIN
+        process_grid, *(info.rz_grid), *(info.flux_mesh), $
+                      output=filename, poorquality=poorquality
+        
+        IF poorquality THEN BEGIN
+          r = DIALOG_MESSAGE("Poor quality equilibrium")
+        ENDIF
+      ENDIF ELSE BEGIN
+        PRINT, "ERROR: Need to generate a mesh first"
       ENDELSE
     END
     'detail': BEGIN
@@ -264,6 +283,9 @@ PRO hypnotoad
                                tooltip="Enforce boundaries strictly")
   Widget_Control, strict_check, Set_Button=1
   
+  process_button = WIDGET_BUTTON(bar, VALUE='Output mesh', $
+                                 uvalue='process', tooltip="Process mesh and output to file")
+
   leftbargeom = WIDGET_INFO(bar, /Geometry)
 
   rightbar = WIDGET_BASE(base, /COLUMN, EVENT_PRO = 'event_handler')
