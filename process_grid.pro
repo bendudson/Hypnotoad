@@ -16,109 +16,12 @@
 ; 
 ; mesh - Structure produced by create_grid.pro
 ;
-
-FUNCTION range, first, last
-  IF first LT last THEN BEGIN
-    RETURN, first + INDGEN(last - first + 1)
-  ENDIF ELSE BEGIN
-    RETURN, last + REVERSE(INDGEN(first - last + 1))
-  ENDELSE
-END
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Generator of continuous surfaces
 ;
-; First call: 
-;   status = gen_surface(mesh=mesh)     - Initialisation
-; Subsequent calls
-;   yi = gen_surface(period=period, last=last, xi=xi)
+; Keywords
+; --------
 ;
-; period - Set to 1 if the surface is periodic, 0 otherwise
-; last   - Set to 1 if this is the last surface
-; xi     - The X index of this surface
-;
-FUNCTION gen_surface, mesh=mesh, period=period, last=last, xi=xi
-  COMMON gen_surf_com, m, ys, xind, nd, domain, visited
-  IF KEYWORD_SET(mesh) THEN BEGIN
-    ; Starting
-    m = mesh
-    xind = 0 ; Radial surface
-    nd = N_ELEMENTS(mesh.npol) ; Number of domains
-    domain = 0 ; The domain to start in
-    
-    ; Running total of npol to get starting y index
-    ys = LONARR(nd)
-    FOR i=1, nd-1 DO ys[i] = ys[i-1] + mesh.npol[i-1]
-    
-    ; visited marks which domains have been used
-    visited = INTARR(nd)
-    
-    RETURN, 0
-  ENDIF
-
-  IF xind GE TOTAL(m.nrad) THEN BEGIN
-    last = 1
-    RETURN, 1 ; Error
-  ENDIF
-  
-  ; Get the next surface
-  ny = 0
-  period = 0 ; Mark as non-periodic
-  last = 0 ; mark as not the last
-  xi = xind
-  REPEAT BEGIN
-    IF visited[domain] EQ 1 THEN BEGIN
-      ; Already visited this domain
-      period = 1 ; Means this domain is periodic
-      BREAK
-    ENDIF
-    
-    ; Get the range of indices for this domain
-    yi = [range(ys[domain], ys[domain]+m.npol[domain]-1)]
-    IF ny EQ 0 THEN yinds = yi ELSE yinds = [yinds, yi]
-    ny = ny + m.npol[domain]
-    
-    visited[domain] = 1 ; Mark domain as visited
-    
-    ; Find next domain
-    IF xind LT m.yup_xsplit[domain] THEN BEGIN
-      domain = m.yup_xin[domain]
-    ENDIF ELSE BEGIN
-      domain = m.yup_xout[domain]
-    ENDELSE
-  ENDREP UNTIL domain LT 0 ; Keep going until hit a boundary
-
-  ; Find a domain which hasn't been visited
-  w = WHERE(visited EQ 0, count)
-  IF count NE 0 THEN BEGIN
-    ; See if there are any regions with boundaries on lower side
-    domain = -1
-    FOR i=0, count-1 DO BEGIN
-      IF xind LT m.ydown_xsplit[w[i]] THEN BEGIN
-        d = m.ydown_xin[w[i]]
-      ENDIF ELSE BEGIN
-        d = m.ydown_xout[w[i]]
-      END
-      IF d LT 0 THEN BEGIN
-        domain = w[i]
-        BREAK
-      ENDIF
-    ENDFOR
-    IF domain LT 0 THEN domain = w[0] ; Set the domain to the first one
-    
-  ENDIF ELSE BEGIN
-    ; No domains left - increase x index (if possible)
-
-    xind = xind + 1
-    visited = INTARR(nd) ; Set all to zeros again
-    domain = 0 ; Start again with the first domain
-    IF xind EQ TOTAL(m.nrad) THEN last = 1 ; No more left
-  ENDELSE
-  
-  IF ny EQ 0 THEN RETURN, 2 ; This shouldn't happen
-  
-  RETURN, yinds
-END
+; poorquality (output) - set to 1 if grid is poor quality
+; gui         (input switch) - If set, uses dialogs to question users
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Average over flux-surfaces
@@ -178,13 +81,14 @@ FUNCTION int_y, var, mesh, loop=loop
   REPEAT BEGIN
     yi = gen_surface(last=last, xi=xi, period=period)
     
-    IF period THEN BEGIN
-      ; Periodic - use FFT
-      f[xi,yi] = fft_integrate(var[xi,yi], loop=lo)
-      loop[xi] = lo
-    ENDIF ELSE BEGIN
-      f[xi,yi] = int_func(var[xi,yi])
-    ENDELSE
+    ;IF period THEN BEGIN
+    ;  ; Periodic - use FFT
+    ;  f[xi,yi] = REAL_PART(fft_integrate(var[xi,yi], loop=lo))
+    ;  loop[xi] = lo
+    ;ENDIF ELSE BEGIN
+      f[xi,yi] = SMOOTH(SMOOTH(int_func(var[xi,yi]), 5, /edge), 5, /edge)
+      loop[xi] = f[xi,yi[N_ELEMENTS(yi)-1]] - f[xi,yi[0]]
+    ;ENDELSE
   ENDREP UNTIL last
   
   RETURN, f
@@ -485,8 +389,81 @@ FUNCTION correct_hthe, Rxy, psixy, Btxy, Bpxy, hthe, pressure, fixhthe=fixhthe
   RETURN, nh
 END
 
-PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Refine an equilibrium
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FUNCTION grid_newt, data
+
+  COMMON grid_newt_com, nx, ny, psixy, gs_f, dpdpsi, R0, Z0, min_f, xfix
   
+  n = nx*ny
+  dxin = REFORM(data, nx-1, ny)
+  dx = FLTARR(nx, ny)
+  IF xfix LE 0 THEN BEGIN
+     dx[1:*,*] = dxin
+  ENDIF ELSE IF xfix GE (nx-1) THEN BEGIN
+     dx[0:(nx-2),*] = dxin
+  ENDIF ELSE BEGIN
+     dx[0:(xfix-1),*] = dxin[0:(nfix-1),*]
+     dx[(xfix+1):*,*] = dxin[nfix:*,*]
+  ENDELSE
+
+  xpos = dx
+  FOR i=0, nx-1 DO xpos[i,*] = xpos[i,*] + i
+
+  Rxy = FLTARR(nx, ny)
+  Zxy = Rxy
+  
+  FOR y=0, ny-1 DO BEGIN
+     Rxy[*,y] = INTERPOL(R0[*,y], FINDGEN(nx), xpos[*,y], /spline)
+     Zxy[*,y] = INTERPOL(Z0[*,y], FINDGEN(nx), xpos[*,y], /spline)
+  ENDFOR
+
+  ; calculate Bpxy, Btxy and hthe
+
+  Btxy = DBLARR(nx, ny)
+  FOR x=0, nx-1 DO Btxy[x,*] = gs_f[x] / Rxy[x,*]
+  hthe = calc_hthe(Rxy, Zxy)
+  Bpxy = calc_bp(psixy, Rxy, Zxy)
+  
+  F = -1.0*calc_force(psixy, Bpxy, Btxy, hthe, Rxy, dpdpsi)
+
+  fm = MAX(ABS(F))
+
+  IF (fm LT min_f) OR (min_f LT 0.0) THEN BEGIN
+      min_f = fm
+      PRINT, MAX(ABS(Rxy - R0)), MAX(ABS(Zxy - Z0)), MAX(ABS(F))
+  ENDIF
+
+  ;!P.multi=[0,0,2,0,0]
+  ;surface, Bpxy, chars=3
+  ;surface, F, chars=3
+
+  IF yind LT 0 THEN val = REFORM(F, n) ELSE val = F[*,yind]
+  
+  RETURN, val
+END
+
+FUNCTION refine_equlibrium, mesh
+  
+END
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Main grid processing routine
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality, $
+                  gui=gui, parent=parent, oldcurv=oldcurv, reverse_bt=reverse_bt
+  
+  ;CATCH, err
+  ;IF err NE 0 THEN BEGIN
+  ;  PRINT, "PROCESS_GRID failed"
+  ;  PRINT, "   Error message: "+!ERROR_STATE.MSG
+  ;  CATCH, /cancel
+  ;  RETURN
+  ;ENDIF
+
   MU = 4.e-7*!PI
 
   poorquality = 0
@@ -494,19 +471,54 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   IF NOT KEYWORD_SET(output) THEN output="bout.grd.nc"
   
   ; Size of the mesh
-  nx = TOTAL(mesh.nrad)
-  ny = TOTAL(mesh.npol)
+  nx = FIX(TOTAL(mesh.nrad))
+  ny = FIX(TOTAL(mesh.npol))
 
 
   Rxy = mesh.Rxy
   Zxy = mesh.Zxy
   psixy = mesh.psixy*mesh.fnorm + mesh.faxis ; Non-normalised psi
 
-  pressure = INTERPOL(rz_grid.pres, rz_grid.npsigrid, mesh.psixy)
-  w = WHERE(mesh.psixy GT MAX(rz_grid.npsigrid), count)
-  IF count GT 0 THEN pressure[w] = 0.
+  pressure = FLTARR(nx, ny)
+  status = gen_surface(mesh=mesh) ; Start generator
+  REPEAT BEGIN
+    ; Get the next domain
+    yi = gen_surface(period=period, last=last, xi=xi)
+    IF period THEN BEGIN
+      ; Pressure only given on core surfaces
+      pressure[xi,yi] = INTERPOL(rz_grid.pres, rz_grid.npsigrid, mesh.psixy[xi,yi], /spline)
+    ENDIF ELSE BEGIN
+      pressure[xi,yi] = rz_grid.pres[N_ELEMENTS(rz_grid.pres)-1]
+    ENDELSE
+  ENDREP UNTIL last
 
-  ; NOTE: WHAT ABOUT PF REGIONS?
+  ; Add a minimum amount
+  IF MIN(pressure) LT 1.0e-2*MAX(pressure) THEN BEGIN
+    PRINT, "****Minimum pressure is very small:", MIN(pressure)
+    PRINT, "****Setting minimum pressure to 1% of maximum"
+    pressure = pressure + 1e-2*MAX(pressure)
+  ENDIF
+  
+  m = MAX(Rxy[0,*],ind)
+  REPEAT BEGIN
+    !P.multi=[0,0,2,0,0]
+    PLOT, pressure[*,ind], xtitle="X index", ytitle="pressure at y="+STRTRIM(STRING(ind),2), color=1
+    PLOT, DERIV(pressure[*,ind]), xtitle="X index", ytitle="DERIV(pressure)", color=1
+    sm = get_yesno("Smooth pressure profile?", gui=gui, dialog_parent=parent)
+    IF sm THEN BEGIN
+      ; Smooth the pressure profile
+      FOR i=0, ny-1 DO BEGIN
+        pressure[*,i] = SMOOTH(pressure[*,i],10)
+      ENDFOR
+      ; Make sure it's still constant on flux surfaces
+      status = gen_surface(mesh=mesh) ; Start generator
+      REPEAT BEGIN
+        ; Get the next domain
+        yi = gen_surface(period=period, last=last, xi=xi)
+        pressure[xi,yi] = MEAN(pressure[xi,yi])
+      ENDREP UNTIL last
+    ENDIF
+  ENDREP UNTIL sm EQ 0
 
   IF MIN(pressure) LT 0.0 THEN BEGIN
     PRINT, ""
@@ -515,9 +527,6 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
     PRINT, ""
     poorquality = 1
   ENDIF
-  
-  w = WHERE(mesh.psixy GE 1.0, count)
-  IF count GT 0 THEN pressure[w] = 0.0
   
   dpdpsi = DDX(psixy, pressure)
 
@@ -531,8 +540,10 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
 
   ; Grid spacing
   dx = FLTARR(nx, ny)
-  dx[*,0] = DERIV(psixy[*,0])
-  FOR y=1, ny-1 DO dx[*,y] = dx[*,0]
+  FOR y=0, ny-1 DO BEGIN
+    dx[0:(nx-2),y] = psixy[1:*,y] - psixy[0:(nx-2),y]
+    dx[nx-1,y] = dx[nx-2,y]
+  ENDFOR
   
   dtheta = 2.*!PI / FLOAT(ny)
   dy = FLTARR(nx, ny) + dtheta
@@ -545,18 +556,21 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   
   ; Get toroidal field from poloidal current function fpol
   Btxy = FLTARR(nx, ny)
-  FOR i=0, nx-1 DO BEGIN
-    FOR j=0, ny-1 DO BEGIN
-      IF mesh.psixy[i,j] GE 1.0 THEN BEGIN
-        fpol = rz_grid.fpol[N_ELEMENTS(rz_grid.fpol)-1]
-      ENDIF ELSE BEGIN
-        fpol = INTERPOL(rz_grid.fpol, rz_grid.npsigrid, mesh.psixy[i,j])
-      ENDELSE
-      
-      Btxy[i,j] = fpol / Rxy[i,j]
-    ENDFOR
-  ENDFOR
+  status = gen_surface(mesh=mesh) ; Start generator
+  REPEAT BEGIN
+    ; Get the next domain
+    yi = gen_surface(period=period, last=last, xi=xi)
 
+    IF period THEN BEGIN
+      ; In the core
+      fpol = INTERPOL(rz_grid.fpol, rz_grid.npsigrid, mesh.psixy[xi,yi], /spline)
+    ENDIF ELSE BEGIN
+      ; Outside core. Could be PF or SOL
+      fpol = rz_grid.fpol[N_ELEMENTS(rz_grid.fpol)-1]      
+    ENDELSE
+    Btxy[xi,yi] = fpol / Rxy[xi,yi]
+  ENDREP UNTIL last
+  
   ; Total B field
   Bxy = SQRT(Btxy^2 + Bpxy^2)
 
@@ -565,8 +579,20 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   ; of hthe
   hthe = FLTARR(nx, ny)
 
-  m = MAX(Rxy[0, *], ymidplane) ; Pick a midplane index
-  
+  ; Pick a midplane index
+  status = gen_surface(mesh=mesh) ; Start generator
+  REPEAT BEGIN
+    ; Get the next domain
+    yi = gen_surface(period=period, last=last, xi=xi)
+    
+    IF period THEN BEGIN
+      ; In the core
+      rmax = MAX(Rxy[xi,yi], ymid)
+      ymidplane = yi[ymid]
+      BREAK
+    ENDIF
+  ENDREP UNTIL last
+
   status = gen_surface(mesh=mesh) ; Start generator
   REPEAT BEGIN
     ; Get the next domain
@@ -616,7 +642,7 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   PRINT, "Calculating pressure profile from force balance"
 
   ; Calculate force balance
-  dpdx = ( -DDX(psixy, Bxy^2 * hthe) + hthe*Bpxy*DDX(psixy, Bpxy) + Btxy*Rxy*DDX(psixy, Btxy*hthe/Rxy) ) / (MU*hthe)
+  dpdx = ( -Bpxy*DDX(psixy, Bpxy * hthe) - Btxy*hthe*DDX(psixy, Btxy) - (Btxy*Btxy*hthe/Rxy)*DDX(psixy, Rxy) ) / (MU*hthe)
   
   ; Surface average
   dpdx2 = surface_average(dpdx, mesh)
@@ -627,9 +653,19 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
     pres[*,i] = int_func(psixy[*,i], dpdx2[*,i])
     pres[*,i] = pres[*,i] - pres[nx-1,i]
   ENDFOR
+
+  status = gen_surface(mesh=mesh) ; Start generator
+  REPEAT BEGIN
+     ; Get the next domain
+     yi = gen_surface(period=period, last=last, xi=xi)
+     
+     ma = MAX(pres[xi,yi])
+     FOR i=0, N_ELEMENTS(yi)-1 DO BEGIN
+        pres[*,yi[i]] = pres[*,yi[i]] - pres[xi,yi[i]] + ma
+     ENDFOR
+  ENDREP UNTIL last
   
-  w = WHERE(pres LT 0., count)
-  IF count GT 0 THEN pres[w] = 0.
+  pres = pres - MIN(pres)
   
   ; Some sort of smoothing here?
   
@@ -637,10 +673,10 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   PRINT, "Force imbalance: ", MEAN(ABS(fb0)), MAX(ABS(fb0))
   
   !P.MULTI=[0,0,2,0,0]
-  SURFACE, pressure, xtitle="X", ytitle="Y", title="Input pressure", chars=2
-  SURFACE, pres, xtitle="X", ytitle="Y", title="New pressure", chars=2
+  SURFACE, pressure, xtitle="X", ytitle="Y", title="Input pressure", chars=2, color=1
+  SURFACE, pres, xtitle="X", ytitle="Y", title="New pressure", chars=2,color=1
   
-  IF get_yesno("Keep new pressure?") THEN BEGIN
+  IF get_yesno("Keep new pressure?", gui=gui, dialog_parent=parent) THEN BEGIN
     pressure = pres
     dpdpsi = dpdx2
   ENDIF
@@ -648,7 +684,7 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
   ; Correct f = RBt using force balance
 
-  IF get_yesno("Correct f=RBt using force balance?") THEN BEGIN
+  IF get_yesno("Correct f=RBt using force balance?", gui=gui, dialog_parent=parent) THEN BEGIN
 
     new_Btxy = newton_bt(psixy, Rxy, Btxy, Bpxy, pres, hthe, mesh)
     
@@ -656,10 +692,10 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
     PRINT, "force imbalance: ", MEAN(ABS(fb0)), MAX(ABS(fb0))
     
     !P.MULTI=[0,0,2,0,0]
-    SURFACE, Btxy, xtitle="X", ytitle="Y", title="Input Bt", chars=2
-    SURFACE, new_Btxy, xtitle="X", ytitle="Y", title="New Bt", chars=2
+    SURFACE, Btxy, xtitle="X", ytitle="Y", title="Input Bt", chars=2,color=1
+    SURFACE, new_Btxy, xtitle="X", ytitle="Y", title="New Bt", chars=2,color=1
 
-    IF get_yesno("Keep new Bt?") THEN BEGIN
+    IF get_yesno("Keep new Bt?", gui=gui, dialog_parent=parent) THEN BEGIN
       Btxy = new_Btxy
       Bxy = SQRT(Btxy^2 + Bpxy^2)
     ENDIF
@@ -671,7 +707,7 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   ; Does not depend on signs
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
   
-  IF get_yesno("Adjust hthe using force balance?") THEN BEGIN
+  IF get_yesno("Adjust hthe using force balance?", gui=gui, dialog_parent=parent) THEN BEGIN
     ; This doesn't behave well close to the x-points
     fixhthe = FIX(nx / 2)
     nh = correct_hthe(Rxy, psixy, Btxy, Bpxy, hthe, pressure, fixhthe=fixhthe)
@@ -687,7 +723,7 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
     OPLOT, nh[*,0], psym=1, color=2
     OPLOT, nh[*,0], color=2
 
-    IF get_yesno("Keep new hthe?") THEN BEGIN
+    IF get_yesno("Keep new hthe?", gui=gui, dialog_parent=parent) THEN BEGIN
       hthe = nh
     ENDIF
   ENDIF
@@ -699,24 +735,85 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
 
   PRINT, "Checking parallel current"
 
-  jpar0 = Bxy * DDX(psixy, Btxy*Rxy) / MU + Rxy * dpdpsi
+  REPEAT BEGIN
 
-  j0 = ((Bpxy*Btxy*Rxy/(Bxy*hthe))*( DDX(psixy, Bxy^2*hthe/Bpxy) - Btxy*Rxy*DDX(psixy,Btxy*hthe/(Rxy*Bpxy)) ) $
-        - Bxy*DDX(psixy, Btxy*Rxy)) / MU
+    jpar0 = Bxy * DDX(psixy, Btxy*Rxy) / MU + Rxy * dpdpsi
+    
+    ; Set to zero in PF and SOL
+    status = gen_surface(mesh=mesh) ; Start generator
+    REPEAT BEGIN
+      ; Get the next domain
+      yi = gen_surface(period=period, last=last, xi=xi)
+      
+      IF NOT period THEN jpar0[xi,yi] = 0.0
+    ENDREP UNTIL last
+    
+    ; Try smoothing jpar0 in psi, preserving zero points and maxima
+    jps = jpar0
+    FOR y=0,ny-1 DO BEGIN
+      j = jpar0[*,y]
+      js = j
+      ma = MAX(ABS(j), ip)
+      IF (ma LT 1.e-4) OR (ip EQ 0) THEN BEGIN
+        jps[*,y] = j
+        CONTINUE
+      ENDIF
+      
+      level = 1.
+      ;i0 = MAX(WHERE(ABS(j[0:ip]) LT level))
+      i1 = MIN(WHERE(ABS(j[ip:*]) LT level))
+      
+      ;IF i0 LE 0 THEN i0 = 1
+      i0 = 1
+      
+      IF i1 EQ -1 THEN i1 = nx-2 ELSE i1 = i1 + ip
+      
+      IF (ip LE i0) OR (ip GE i1) THEN STOP
+      
+      ; Now preserve starting and end points, and peak value
+      div = FIX((i1-i0)/10)+1 ; reduce number of points by this factor
+      
+      inds = [i0] ; first point
+      FOR i=i0+div, ip-div, div DO inds = [inds, i]
+      inds = [inds, ip] ; Put in the peak point
+      
+      ; Calculate spline interpolation of inner part
+      js[0:ip] = spline_mono(inds, j[inds], INDGEN(ip+1), $
+                             yp0=(j[i0] - j[i0-1]), ypn_1=0.0)
+      
+      inds = [ip] ; peak point
+      FOR i=ip+div, i1-div, div DO BEGIN
+        inds = [inds, i]
+      ENDFOR
+      
+      inds = [inds, i1] ; Last point
+      js[ip:i1] = spline_mono(inds, j[inds], ip+INDGEN(i1-ip+1), $
+                              yp0=0.0, ypn_1=(j[i1+1]-j[i1]))
+      
+      jps[*,y] = js
+    ENDFOR
+    
+    jpar0 = jps ; Use the smoothed profile
+    
+    
+    j0 = ((Bpxy*Btxy*Rxy/(Bxy*hthe))*( DDX(psixy, Bxy^2*hthe/Bpxy) - Btxy*Rxy*DDX(psixy,Btxy*hthe/(Rxy*Bpxy)) ) $
+          - Bxy*DDX(psixy, Btxy*Rxy)) / MU
+    
   
-  IF (MEAN(ABS(j0 + jpar0)) LT MEAN(ABS(j0 - jpar0))) THEN BEGIN
-    PRINT, "****Equilibrium has -ve toroidal field"
-    Btxy = -Btxy
-    j0 = -j0
-  ENDIF
-  PRINT, "Maximum difference in jpar0: ", MAX(ABS(j0[2:*,*] - jpar0[2:*,*]))
-  PRINT, "Maximum percentage difference: ", 200.*MAX(ABS((jpar0[2:*,*] - j0[2:*,*])/(jpar0[2:*,*]+j0[2:*,*])))
+    PRINT, "Maximum difference in jpar0: ", MAX(ABS(j0[2:*,*] - jpar0[2:*,*]))
+    PRINT, "Maximum percentage difference: ", 200.*MAX(ABS((jpar0[2:*,*] - j0[2:*,*])/(jpar0[2:*,*]+j0[2:*,*])))
+    
+    !P.MULTI=[0,0,2,0,0]
+    SURFACE, jpar0, xtitle="X", ytitle="Y", title="Jpar from f and p profiles", chars=2,color=1
+    SURFACE, j0, xtitle="X", ytitle="Y", title="Jpar from B field", chars=2,color=1
 
-  !P.MULTI=[0,0,2,0,0]
-  SURFACE, jpar0, xtitle="X", ytitle="Y", title="Jpar from f and p profiles", chars=2
-  SURFACE, j0, xtitle="X", ytitle="Y", title="Jpar from B field", chars=2
+    IF get_yesno("Reverse Jpar and Btor sign?", gui=gui, dialog_parent=parent) THEN BEGIN
+      Btxy = -Btxy
+      j0 = -j0
+    ENDIF ELSE BREAK
+  ENDREP UNTIL 0
   
-  IF get_yesno("Use B field jpar?") THEN BEGIN
+  IF get_yesno("Use B field jpar?", gui=gui, dialog_parent=parent) THEN BEGIN
     jpar0 = j0
   ENDIF
   
@@ -736,27 +833,78 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
 
   ;;;;;;;;;;;;;;;;;;;; THETA_ZERO ;;;;;;;;;;;;;;;;;;;;;;
   ; re-set zshift to be zero at the outboard midplane
-  qm = qinty[*,ymidplane]
-  sm = sinty[*,ymidplane]
   
-  FOR i=0, ny-1 DO BEGIN
-     qinty[*,i] = qinty[*,i] - qm
-     sinty[*,i] = sinty[*,i] - sm
-  ENDFOR
+  PRINT, "MIDPLANE INDEX = ", ymidplane
+
+  status = gen_surface(mesh=mesh) ; Start generator
+  REPEAT BEGIN
+    ; Get the next domain
+    yi = gen_surface(period=period, last=last, xi=xi)
+    
+    w = WHERE(yi EQ ymidplane, count)
+    IF count GT 0 THEN BEGIN
+      ; Crosses the midplane
+      qinty[xi, yi] = qinty[xi, yi] - qinty[xi, ymidplane]
+      sinty[xi, yi] = sinty[xi, yi] - sinty[xi, ymidplane]
+    ENDIF ELSE BEGIN
+      ; Doesn't include a point at the midplane
+      qinty[xi, yi] = qinty[xi, yi] - qinty[xi,yi[0]]
+      sinty[xi, yi] = sinty[xi, yi] - sinty[xi,yi[0]]
+    ENDELSE
+  ENDREP UNTIL last
   
   ;;;;;;;;;;;;;;;;;;;; CURVATURE ;;;;;;;;;;;;;;;;;;;;;;;
   ; Calculating b x kappa
   
-  dpb = DBLARR(nx, ny)      ; quantity used for y and z components
-      
-  FOR i=0, ny-1 DO BEGIN
-    dpb[*,i] = MU*dpdpsi/Bxy[*,i]
-  ENDFOR
-  dpb = dpb + DDX(psixy, Bxy)
-  
-  bxcvx = Bpxy * DDY(Btxy*Rxy / Bxy, mesh) / hthe
-  bxcvy = Bpxy*Btxy*Rxy*dpb / (hthe*Bxy^2)
-  bxcvz = -dpb - sinty*bxcvx 
+  IF KEYWORD_SET(oldcurv) THEN BEGIN
+    
+    PRINT, "*** Calculating curvature in toroidal coordinates"
+    
+    thetaxy = FLTARR(nx, ny)
+    status = gen_surface(mesh=mesh) ; Start generator
+    REPEAT BEGIN
+      ; Get the next domain
+      yi = gen_surface(period=period, last=last, xi=xi)
+      thetaxy[xi,yi] = FINDGEN(N_ELEMENTS(yi))*dtheta
+    ENDREP UNTIL last
+    
+    brxy = mesh.dpsidR / Rxy
+    bzxy = -mesh.dpsidZ / Rxy
+    
+    curvature, nx, ny, FLOAT(Rxy), FLOAT(Zxy), FLOAT(brxy), FLOAT(bzxy), FLOAT(btxy), $
+      FLOAT(psixy), FLOAT(thetaxy), hthe, $
+      bxcv=bxcv, mesh=mesh
+
+    bxcvx = bxcv.psi 
+    bxcvy = bxcv.theta
+    bxcvz = bxcv.phi - sinty*bxcv.psi - pitch*bxcv.theta
+
+    ; x borders
+    bxcvx[0,*] = bxcvx[1,*]
+    bxcvx[nx-1,*] = bxcvx[nx-2,*]
+    
+    bxcvy[0,*] = bxcvy[1,*]
+    bxcvy[nx-1,*] = bxcvy[nx-2,*]
+    
+    bxcvz[0,*] = bxcvz[1,*]
+    bxcvz[nx-1,*] = bxcvz[nx-2,*]
+    
+  ENDIF ELSE BEGIN
+    ; calculate in flux coordinates.
+    
+    PRINT, "*** Calculating curvature in flux coordinates"
+    
+    dpb = DBLARR(nx, ny)      ; quantity used for y and z components
+    
+    FOR i=0, ny-1 DO BEGIN
+      dpb[*,i] = MU*dpdpsi/Bxy[*,i]
+    ENDFOR
+    dpb = dpb + DDX(psixy, Bxy)
+    
+    bxcvx = Bpxy * DDY(Btxy*Rxy / Bxy, mesh) / hthe
+    bxcvy = Bpxy*Btxy*Rxy*dpb / (hthe*Bxy^2)
+    bxcvz = -dpb - sinty*bxcvx 
+  ENDELSE
   
   ;;;;;;;;;;;;;;;;;;;; TOPOLOGY ;;;;;;;;;;;;;;;;;;;;;;;
   ; Calculate indices for backwards-compatibility
@@ -870,8 +1018,6 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
   ; save to file
 
-  ;STOP
-
   PRINT, "Writing grid to file "+output
 
   handle = file_open(output, /CREATE)
@@ -888,15 +1034,8 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   s = file_write(handle, "jyseps1_2", jyseps1_2)
   s = file_write(handle, "jyseps2_1", jyseps2_1)
   s = file_write(handle, "jyseps2_2", jyseps2_2)
+  s = file_write(handle, "ny_inner", ny_inner);
   
-  ; Topology for general configurations
-  s = file_write(handle, "yup_xsplit", mesh.yup_xsplit)
-  s = file_write(handle, "ydown_xsplit", mesh.ydown_xsplit)
-  s = file_write(handle, "yup_xin", mesh.yup_xin)
-  s = file_write(handle, "yup_xout", mesh.yup_xout)
-  s = file_write(handle, "ydown_xin", mesh.ydown_xin)
-  s = file_write(handle, "ydown_xout", mesh.ydown_xout)
-
   ; Grid spacing
   
   s = file_write(handle, "dx", dx)
@@ -915,6 +1054,16 @@ PRO process_grid, rz_grid, mesh, output=output, poorquality=poorquality
   s = file_write(handle, "hthe", hthe)
   s = file_write(handle, "sinty", sinty)
   s = file_write(handle, "psixy", psixy)
+
+  ; Topology for general configurations
+  s = file_write(handle, "yup_xsplit", mesh.yup_xsplit)
+  s = file_write(handle, "ydown_xsplit", mesh.ydown_xsplit)
+  s = file_write(handle, "yup_xin", mesh.yup_xin)
+  s = file_write(handle, "yup_xout", mesh.yup_xout)
+  s = file_write(handle, "ydown_xin", mesh.ydown_xin)
+  s = file_write(handle, "ydown_xout", mesh.ydown_xout)
+  s = file_write(handle, "nrad", mesh.nrad)
+  s = file_write(handle, "npol", mesh.npol)
 
   ; plasma profiles
 

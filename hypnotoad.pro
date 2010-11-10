@@ -23,7 +23,29 @@ PRO plot_region, R, Z, ymin, ymax, _extra=_extra
 END
 
 PRO plot_rz_equil, data
-  CONTOUR, data.psi, data.r, data.z, /iso, nlev=40
+  nlev = 100
+  minf = MIN(data.psi)
+  maxf = MAX(data.psi)
+  levels = findgen(nlev)*(maxf-minf)/FLOAT(nlev-1) + minf
+  
+  safe_colors, /first
+  CONTOUR, data.psi, data.r, data.z, levels=levels, /iso, color=1
+  IF data.nlim GT 2 THEN OPLOT, [data.rlim, data.rlim[0]], $
+                                [data.zlim, data.zlim[0]], $
+                                color = 2, thick=2
+  critical = data.critical
+  IF data.nlim GT 2 THEN BEGIN
+    OPLOT, [REFORM(data.rlim), data.rlim[0]], [REFORM(data.zlim), data.zlim[0]], $
+           thick=2,color=2
+    
+    ; Check that the critical points are inside the boundary
+    bndryi = FLTARR(2, data.nlim)
+    bndryi[0,*] = INTERPOL(FINDGEN(data.nr), data.R, data.rlim)
+    bndryi[1,*] = INTERPOL(FINDGEN(data.nz), data.Z, data.zlim)
+    critical = critical_bndry(critical, bndryi)
+  ENDIF
+  ; Overplot the separatrices, O-points
+  oplot_critical, data.psi, data.r, data.z, critical
 END
 
 
@@ -48,8 +70,88 @@ PRO oplot_mesh, rz_mesh, flux_mesh
 END
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Event handling procedure
+; Event handling procedures
 
+; For detailed settings popup
+PRO popup_event, event
+  ; Get the UVALUE
+  widget_control, event.id, get_uvalue=uvalue
+  
+  ; Retrieve a copy of information stored in tlb
+  widget_control, event.top, get_uvalue=info
+
+  widget_control, info.top, get_uvalue=base_info
+  
+  IF N_ELEMENTS(uvalue) EQ 0 THEN RETURN ; Undefined
+  
+  CASE uvalue OF
+    'mesh': BEGIN
+      IF base_info.rz_grid_valid EQ 0 THEN BEGIN
+        PRINT, "ERROR: No valid equilibrium data. Read from file first"
+        a = DIALOG_MESSAGE("No valid equilibrium data. Read from file first", /error)
+        RETURN
+      ENDIF
+      
+      boundary = TRANSPOSE([[(*base_info.rz_grid).rlim], [(*base_info.rz_grid).zlim]])
+      
+      ; retrieve the values from the entry fields
+      
+      nnrad = N_ELEMENTS(info.nrad_field)
+      nrad = LONARR(nnrad)
+      FOR i=0, nnrad-1 DO BEGIN
+        widget_control, info.nrad_field[i], get_value=nr
+        nrad[i] = nr
+      ENDFOR
+
+      ninpsi = N_ELEMENTS(info.in_psi_field)
+      psi_inner = FLTARR(ninpsi)
+      FOR i=0, ninpsi-1 DO BEGIN
+        widget_control, info.in_psi_field[i], get_value=inp
+        psi_inner[i] = inp
+      ENDFOR
+
+      nnpol = N_ELEMENTS(info.npol_field)
+      npol = LONARR(nnpol)
+      FOR i=0, nnpol-1 DO BEGIN
+        widget_control, info.npol_field[i], get_value=np
+        npol[i] = np
+      ENDFOR
+      
+      widget_control, base_info.psi_outer_field, get_value=psi_outer
+
+      widget_control, base_info.rad_peak_field, get_value=rad_peak
+      
+      settings = {nrad:nrad, npol:npol, psi_inner:psi_inner, psi_outer:psi_outer}
+      
+      WIDGET_CONTROL, base_info.status, set_value="Generating mesh ..."
+      
+      ; Delete the window, as number of fields may change
+      WIDGET_CONTROL, event.top, /destroy
+      
+      ; Create the mesh
+      mesh = create_grid((*(base_info.rz_grid)).psi, (*(base_info.rz_grid)).r, (*(base_info.rz_grid)).z, $
+                         settings, $
+                         boundary=boundary, strict=base_info.strict_bndry, rad_peaking=rad_peak, $
+                         single_rad_grid=base_info.single_rad_grid, $
+                         critical=(*(base_info.rz_grid)).critical)
+      
+      IF mesh.error EQ 0 THEN BEGIN
+        PRINT, "Successfully generated mesh"
+        WIDGET_CONTROL, base_info.status, set_value="Successfully generated mesh. All glory to the Hypnotoad!"
+        oplot_mesh, (*base_info.rz_grid), mesh
+        
+        base_info.flux_mesh_valid = 1
+        base_info.flux_mesh = PTR_NEW(mesh)
+        widget_control, info.top, set_UVALUE=base_info
+      ENDIF ELSE BEGIN
+        a = DIALOG_MESSAGE("Could not generate mesh", /error)
+        WIDGET_CONTROL, base_info.status, set_value="  *** FAILED to generate mesh ***"
+      ENDELSE
+    END
+  ENDCASE
+END
+
+; For the main window
 PRO event_handler, event
   ; Get the UVALUE
   widget_control, event.id, get_uvalue=uvalue
@@ -63,6 +165,10 @@ PRO event_handler, event
     'aandg': BEGIN
       PRINT, "Open G-eqdsk (neqdsk) file"
       filename = DIALOG_PICKFILE(dialog_parent=event.top, file="neqdsk", /read)
+      IF STRLEN(filename) EQ 0 THEN BEGIN
+        WIDGET_CONTROL, info.status, set_value="   *** Cancelled open file ***"
+        RETURN ;BREAK
+      ENDIF
       PRINT, "Trying to read file "+filename
       g = read_neqdsk(filename)
       
@@ -71,19 +177,23 @@ PRO event_handler, event
         PRINT, "Successfully read equilibrium"
         WIDGET_CONTROL, info.status, set_value="Successfully read "+filename
         
+        ; Analyse the equilibrium
+        critical = analyse_equil(g.psi, REFORM(g.r[*,0]), REFORM(g.z[0,*]))
+
         ; Extract needed data from g-file struct
         
         rz_grid = {nr:g.nx, nz:g.ny, $  ; Number of grid points
                    r:REFORM(g.r[*,0]), z:REFORM(g.z[0,*]), $  ; R and Z as 1D arrays
                    simagx:g.simagx, sibdry:g.sibdry, $ ; Range of psi
                    psi:g.psi, $  ; Poloidal flux in Weber/rad on grid points
-                   npsigrid:(FINDGEN(N_ELEMENTS(g.pres))/N_ELEMENTS(g.pres)), $ ; Normalised psi grid for fpol, pres and qpsi
+                   npsigrid:(FINDGEN(N_ELEMENTS(g.pres))/(N_ELEMENTS(g.pres)-1)), $ ; Normalised psi grid for fpol, pres and qpsi
                    fpol:g.fpol, $ ; Poloidal current function on uniform flux grid
                    pres:g.pres, $ ; Plasma pressure in nt/m^2 on uniform flux grid
                    qpsi:g.qpsi, $ ; q values on uniform flux grid
-                   nlim:g.nlim, rlim:g.xlim, zlim:g.ylim} ; Wall boundary
+                   nlim:g.nlim, rlim:g.xlim, zlim:g.ylim, $ ; Wall boundary
+                   critical:critical} ; Critical point structure
         
-
+        
         IF info.rz_grid_valid GT 0 THEN BEGIN
           ; Need to free existing data
           PTR_FREE, info.rz_grid
@@ -95,9 +205,58 @@ PRO event_handler, event
         
         ; Plot the equilibrium
         plot_rz_equil, rz_grid
-
+        
         ; Set info to new values
         widget_control, event.top, set_UVALUE=info
+        
+        IF rz_grid.nlim LT 3 THEN BEGIN
+          PRINT, "WARNING: No boundary found!"
+        ENDIF
+      ENDIF ELSE BEGIN
+        ; Couldn't read data
+        PRINT, "ERROR: Failed to read grid file"
+        WIDGET_CONTROL, info.status, set_value="   *** Failed to read G-EQDSK file "+filename+" ***"
+      ENDELSE
+    END
+    'bndry': BEGIN
+      IF info.rz_grid_valid NE 1 THEN BEGIN
+        PRINT, "ERROR: Need to read an equilibrium first"
+        WIDGET_CONTROL, info.status, set_value="   *** Need to read equilibrium first ***"
+        BREAK
+      ENDIF
+      PRINT, "Read boundary from G-eqdsk (neqdsk) file"
+      filename = DIALOG_PICKFILE(dialog_parent=event.top, file="neqdsk", /read)
+      IF STRLEN(filename) EQ 0 THEN BEGIN
+        WIDGET_CONTROL, info.status, set_value="   *** Cancelled open file ***"
+        BREAK
+      ENDIF
+      PRINT, "Trying to read file "+filename
+      g = read_neqdsk(filename)
+      IF SIZE(g, /TYPE) EQ 8 THEN BEGIN
+        ; Got a structure
+        PRINT, "Successfully read equilibrium"
+        WIDGET_CONTROL, info.status, set_value="Successfully read "+filename
+        
+        rz_grid = {nr:(*info.rz_grid).nr, nz:(*info.rz_grid).nz, $
+                   r:(*info.rz_grid).r, z:(*info.rz_grid).z, $
+                   simagx:(*info.rz_grid).simagx, sibdry:(*info.rz_grid).sibdry, $
+                   psi:(*info.rz_grid).psi, $
+                   npsigrid:(*info.rz_grid).npsigrid, $
+                   fpol:(*info.rz_grid).fpol, $
+                   pres:(*info.rz_grid).pres, $
+                   qpsi:(*info.rz_grid).qpsi, $
+                   nlim:g.nlim, rlim:g.xlim, zlim:g.ylim, $ ; Wall boundary
+                   critical:(*info.rz_grid).critical}
+        IF rz_grid.nlim LT 3 THEN BEGIN
+          PRINT, "WARNING: No boundary found!"
+        ENDIF ELSE BEGIN
+          PTR_FREE, info.rz_grid
+          info.rz_grid = PTR_NEW(rz_grid)
+          widget_control, event.top, set_UVALUE=info
+          
+          ; Plot the equilibrium
+          plot_rz_equil, rz_grid
+        ENDELSE
       ENDIF ELSE BEGIN
         ; Couldn't read data
         PRINT, "ERROR: Failed to read grid file"
@@ -111,9 +270,6 @@ PRO event_handler, event
         a = DIALOG_MESSAGE("No valid equilibrium data. Read from file first", /error)
         RETURN
       ENDIF
-      ;boundary=fltarr(2,4)
-      ;boundary[0,*] = [1.0, 1.0, 2.5, 2.5]
-      ;boundary[1,*] = [-1.4, 1.4, 1.4, -1.4]
       
       boundary = TRANSPOSE([[(*info.rz_grid).rlim], [(*info.rz_grid).zlim]])
       
@@ -126,13 +282,19 @@ PRO event_handler, event
 
         widget_control, info.psi_inner_field, get_value=psi_inner
         widget_control, info.psi_outer_field, get_value=psi_outer
+
+        widget_control, info.rad_peak_field, get_value=rad_peak
+
         settings = {nrad:nrad, npol:npol, psi_inner:psi_inner, psi_outer:psi_outer}
       ENDELSE
       
       WIDGET_CONTROL, info.status, set_value="Generating mesh ..."
       
       mesh = create_grid((*(info.rz_grid)).psi, (*(info.rz_grid)).r, (*(info.rz_grid)).z, settings, $
-                         boundary=boundary, strict=info.strict_bndry)
+                         boundary=boundary, strict=info.strict_bndry, rad_peaking=rad_peak, $
+                         /nrad_flexible, $
+                         single_rad_grid=info.single_rad_grid, $
+                         critical=(*(info.rz_grid)).critical)
       IF mesh.error EQ 0 THEN BEGIN
         PRINT, "Successfully generated mesh"
         WIDGET_CONTROL, info.status, set_value="Successfully generated mesh. All glory to the Hypnotoad!"
@@ -142,7 +304,7 @@ PRO event_handler, event
         info.flux_mesh = PTR_NEW(mesh)
         widget_control, event.top, set_UVALUE=info
       ENDIF ELSE BEGIN
-        a = DIALOG_MESSAGE("Could not generate mesh", /error)
+        a = DIALOG_MESSAGE("Could not generate mesh", /error, dialog_parent=info.draw)
         WIDGET_CONTROL, info.status, set_value="  *** FAILED to generate mesh ***"
       ENDELSE
     END
@@ -152,25 +314,60 @@ PRO event_handler, event
       filename = DIALOG_PICKFILE(dialog_parent=event.top, file="bout.grd.nc", $
                                  /write, /overwrite_prompt)
       
+      IF STRLEN(filename) EQ 0 THEN BEGIN
+        WIDGET_CONTROL, info.status, set_value="   *** Cancelled process mesh ***"
+        BREAK
+      ENDIF
+
       IF info.rz_grid_valid AND info.flux_mesh_valid THEN BEGIN
+        
+        oldcurv = 1
+        IF info.flux_curv THEN oldcurv=0
+      
+        
         process_grid, *(info.rz_grid), *(info.flux_mesh), $
-                      output=filename, poorquality=poorquality
+                      output=filename, poorquality=poorquality, /gui, parent=info.draw, $
+                      oldcurv=oldcurv
         
         IF poorquality THEN BEGIN
-          r = DIALOG_MESSAGE("Poor quality equilibrium")
+          r = DIALOG_MESSAGE("Poor quality equilibrium", dialog_parent=info.draw)
         ENDIF
       ENDIF ELSE BEGIN
         PRINT, "ERROR: Need to generate a mesh first"
+        WIDGET_CONTROL, info.status, set_value="  *** Need to generate mesh first ***"
       ENDELSE
     END
-    'detail': BEGIN
-      ; Checkbox with detail settings
-      info.detail_set = event.select
-      widget_control, event.top, set_UVALUE=info
+    'print': BEGIN
+      IF info.rz_grid_valid THEN BEGIN
+        filename = DIALOG_PICKFILE(dialog_parent=event.top, file="bout.grd.ps", $
+                                 /write, /overwrite_prompt)
+        
+        IF STRLEN(filename) EQ 0 THEN BEGIN
+          WIDGET_CONTROL, info.status, set_value="   *** Cancelled printing ***"
+          BREAK
+        ENDIF
+        SET_PLOT, 'PS'
+        DEVICE, file=filename
+        plot_mesh, *(info.flux_mesh), xtitle="Major radius [m]", $
+          ytitle="Height [m]", title="Generated: "+SYSTIME()
+        DEVICE, /close
+        SET_PLOT, 'X'
+        WIDGET_CONTROL, info.status, set_value="Plotted mesh to file "+filename
+      ENDIF ELSE BEGIN
+        WIDGET_CONTROL, info.status, set_value="  *** Need to generate mesh first ***"
+      ENDELSE
     END
     'strict': BEGIN
       ; Checkbox with boundary strictness
       info.strict_bndry = event.select
+      widget_control, event.top, set_UVALUE=info
+    END
+    'curv': BEGIN
+      info.flux_curv = event.select
+      widget_control, event.top, set_UVALUE=info
+    END
+    'radgrid': BEGIN
+      info.single_rad_grid = event.select
       widget_control, event.top, set_UVALUE=info
     END
     'draw': BEGIN
@@ -186,6 +383,191 @@ PRO event_handler, event
       xi = FIX(ind / TOTAL((*info.flux_mesh).npol))
       yi = FIX(ind MOD TOTAL((*info.flux_mesh).npol))
       PRINT, xi, yi
+    END
+    'detail': BEGIN
+      ; Control detailed settings. 
+      IF info.rz_grid_valid EQ 0 THEN BEGIN
+        WIDGET_CONTROL, info.status, set_value="   *** Cancelled printing ***"
+        RETURN
+      ENDIF
+      
+      IF info.flux_mesh_valid THEN BEGIN
+        critical = (*info.flux_mesh).critical
+      ENDIF ELSE BEGIN
+        
+        critical = (*(info.rz_grid)).critical
+        IF (*(info.rz_grid)).nlim GT 2 THEN BEGIN
+          ; Check that the critical points are inside the boundary
+          bndryi = FLTARR(2, (*(info.rz_grid)).nlim)
+          bndryi[0,*] = INTERPOL(FINDGEN((*(info.rz_grid)).nr), (*(info.rz_grid)).R, (*(info.rz_grid)).rlim)
+          bndryi[1,*] = INTERPOL(FINDGEN((*(info.rz_grid)).nz), (*(info.rz_grid)).Z, (*(info.rz_grid)).zlim)
+          critical = critical_bndry(critical, bndryi)
+        ENDIF
+        
+        ; Restrict the psi range
+        widget_control, info.psi_outer_field, get_value=psi_outer
+
+        critical = restrict_psi_range(critical, psi_outer)
+      ENDELSE
+      
+      n_xpoint = critical.n_xpoint
+
+      ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+      ; Create a new window
+      popup = WIDGET_BASE(title="Detailed settings", /COLUMN, $ ; mbar=mbar
+                          EVENT_PRO = 'popup_event')
+      
+      ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+      ; Number of radial regions
+
+      l = WIDGET_LABEL(popup, value="Number of points in radial direction")
+      rad_base = WIDGET_BASE(popup, /ROW, EVENT_PRO='popup_event')
+      
+      IF info.flux_mesh_valid THEN BEGIN
+        ; Use the result from create_grid
+        
+        nnrad = N_ELEMENTS((*info.flux_mesh).nrad)
+        nrad_field = LONARR(nnrad)
+        
+        nrad_field[0] = CW_FIELD( rad_base,                            $
+                                  title  = 'Core:',      $ 
+                                  uvalue = 'nrad',                $ 
+                                  /long,                          $ 
+                                  value = (*info.flux_mesh).nrad[0], $
+                                  xsize=8                         $
+                                )
+      
+        IF nnrad GT 1 THEN BEGIN
+          IF nnrad GT 2 THEN BEGIN
+            ; Regions between separatrices
+            
+            FOR i=1, nnrad-2 DO BEGIN
+              nrad_field[i] = CW_FIELD( rad_base,                            $
+                                        title  = 'Inter-separatrix:',      $ 
+                                        uvalue = 'nrad',                $ 
+                                        /long,                          $ 
+                                        value = (*info.flux_mesh).nrad[i], $
+                                        xsize=8                         $
+                                      )
+            ENDFOR
+          ENDIF
+          
+          ; SOL region
+          nrad_field[nnrad-1] = CW_FIELD( rad_base,                            $
+                                          title  = 'SOL:',      $ 
+                                          uvalue = 'nrad',                $ 
+                                          /long,                          $ 
+                                          value = (*info.flux_mesh).nrad[nnrad-1], $
+                                          xsize=8                         $
+                                        )
+        ENDIF
+      ENDIF ELSE BEGIN
+        nnrad = 1
+        nrad_field = LONARR(nnrad)
+        
+        widget_control, info.nrad_field, get_value=nrad
+
+        nrad_field[0] = CW_FIELD( rad_base,                       $
+                                  title  = 'Total:',              $
+                                  uvalue = 'nrad',                $ 
+                                  /long,                          $ 
+                                  value = nrad,                   $
+                                  xsize=8                         $
+                                )
+      ENDELSE
+      
+      ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+      ; Inner psi
+      
+      l = WIDGET_LABEL(popup, value="Inner psi")
+      l = WIDGET_LABEL(popup, value="(Clockwise from innermost x-point)")
+      
+      in_psi_base = WIDGET_BASE(popup, /ROW, EVENT_PRO='popup_event')
+      in_psi_field = LONARR(n_xpoint+1)
+      
+      IF info.flux_mesh_valid THEN BEGIN
+        psi_inner = (*info.flux_mesh).psi_inner
+      ENDIF ELSE BEGIN
+        widget_control, info.psi_inner_field, get_value=psi_in
+        psi_inner = FLTARR(n_xpoint+1) + psi_in
+      ENDELSE
+      
+      in_psi_field[0] = CW_FIELD( in_psi_base,                    $
+                                  title  = 'Core: ',              $ 
+                                  uvalue = 'in_psi',              $ 
+                                  /float,                          $ 
+                                  value = psi_inner[0],           $
+                                  xsize=8                         $
+                                )
+      FOR i=1, n_xpoint DO BEGIN
+        in_psi_field[i] = CW_FIELD( in_psi_base,                    $
+                                    title  = 'PF '+STRTRIM(STRING(i),2)+': ', $ 
+                                    uvalue = 'in_psi',              $ 
+                                    /float,                          $ 
+                                    value = psi_inner[i],           $
+                                    xsize=8                         $
+                                  )
+      ENDFOR
+
+      ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+      ; Poloidal points
+
+      l = WIDGET_LABEL(popup, value="Number of points in poloidal direction")
+      l = WIDGET_LABEL(popup, value="(Clockwise from innermost x-point)")
+      pol_base = WIDGET_BASE(popup, /ROW, EVENT_PRO='popup_event')
+      
+      IF info.flux_mesh_valid THEN BEGIN
+        nnpol = N_ELEMENTS((*info.flux_mesh).npol)
+        
+        npol_field = LONARR(nnpol)
+      
+        IF n_xpoint EQ 0 THEN BEGIN
+          npol_field[0] = CW_FIELD( pol_base,                            $
+                                    title  = 'Core: ',      $ 
+                                    uvalue = 'npol',                $ 
+                                    /long,                          $ 
+                                    value = (*info.flux_mesh).npol[0], $
+                                    xsize=8                         $
+                                  )
+        ENDIF ELSE BEGIN
+          FOR i=0, nnpol-1 DO BEGIN
+            IF i MOD 3 EQ 1 THEN title='Core: ' ELSE title  = 'Private Flux: '
+            npol_field[i] = CW_FIELD( pol_base,                          $
+                                      title  = title,                    $ 
+                                      uvalue = 'npol',                   $ 
+                                      /long,                             $ 
+                                      value = (*info.flux_mesh).npol[i], $
+                                      xsize=8                            $
+                                    )
+          ENDFOR
+        ENDELSE
+      ENDIF ELSE BEGIN
+        nnpol = 1
+        npol_field = LONARR(nnpol)
+        
+        widget_control, info.npol_field, get_value=npol
+        npol_field[0] = CW_FIELD( pol_base,                       $
+                                  title  = 'Total: ',             $ 
+                                  uvalue = 'npol',                $ 
+                                  /long,                          $ 
+                                  value = npol, $
+                                  xsize=8                         $
+                                )
+      ENDELSE
+      
+      mesh_button = WIDGET_BUTTON(popup, VALUE='Generate mesh', $
+                                  uvalue='mesh', tooltip="Generate a new mesh")
+      
+      popup_info = {info:info, $ ; Store the main info too
+                    nrad_field:nrad_field, $
+                    in_psi_field:in_psi_field, $
+                    npol_field:npol_field, $
+                    top:event.top}
+
+      WIDGET_CONTROL, popup, set_uvalue=popup_info 
+
+      WIDGET_CONTROL, popup, /real
+      XMANAGER, 'popup', popup, /just_reg
     END
     ELSE: PRINT, "Unknown event", uvalue
   ENDCASE
@@ -241,6 +623,9 @@ PRO hypnotoad
   
   read_button = WIDGET_BUTTON(bar, VALUE='Read G-EQDSK', $
                               uvalue='aandg', tooltip="Read RZ equilibrium from EFIT")
+
+  bndry_button = WIDGET_BUTTON(bar, VALUE='Read boundary', $
+                               uvalue='bndry', tooltip="Read boundary from g-eqdsk file")
   
   nrad_field = CW_FIELD( bar,                            $
                          title  = 'Radial points:',      $ 
@@ -272,19 +657,40 @@ PRO hypnotoad
                               xsize=8                         $
                             )
   
-
-  mesh_button = WIDGET_BUTTON(bar, VALUE='Generate mesh', $
-                              uvalue='mesh', tooltip="Generate a new mesh")
+  
+  rad_peak_field = CW_FIELD( bar,                            $
+                             title  = 'Sep. packing:',          $ 
+                             uvalue = 'rad_peak',           $ 
+                             /floating,                      $ 
+                             value = 1,                    $
+                             xsize=8                         $
+                           )
 
   checkboxbase = WIDGET_BASE(bar, /COLUMN, EVENT_PRO = 'event_handler', /NonExclusive)
-  region_check = WIDGET_BUTTON(checkboxbase, VALUE="Detailed settings", uvalue='detail', $
-                               tooltip="Set parameters for each region separately")
   strict_check = WIDGET_BUTTON(checkboxbase, VALUE="Strict boundaries", uvalue='strict', $
                                tooltip="Enforce boundaries strictly")
   Widget_Control, strict_check, Set_Button=1
+
+  curv_check = WIDGET_BUTTON(checkboxbase, VALUE="Flux curvature", uvalue='curv', $
+                             tooltip="Calculate curvature in flux coordinates")
+  Widget_Control, curv_check, Set_Button=0
   
+  radgrid_check = WIDGET_BUTTON(checkboxbase, VALUE="Single radial grid", uvalue='radgrid', $
+                             tooltip="Grid radially in one")
+  Widget_Control, radgrid_check, Set_Button=0
+
+  mesh_button = WIDGET_BUTTON(bar, VALUE='Generate mesh', $
+                              uvalue='mesh', tooltip="Generate a new mesh")
+  
+  detail_button = WIDGET_BUTTON(bar, VALUE='Detailed settings', $
+                                uvalue='detail', $
+                                tooltip="Set quantities in each region")
+
   process_button = WIDGET_BUTTON(bar, VALUE='Output mesh', $
                                  uvalue='process', tooltip="Process mesh and output to file")
+
+  print_button = WIDGET_BUTTON(bar, VALUE='Plot to file', $
+                               uvalue='print', tooltip="Produce a Postscript plot of the mesh")
 
   leftbargeom = WIDGET_INFO(bar, /Geometry)
 
@@ -312,8 +718,11 @@ PRO hypnotoad
            detail_set:0, $ ; 1 if using detailed settings
            strict_bndry:1, $ ; 1 if boundaries should be strict
            psi_inner_field:psi_inner_field, psi_outer_field:psi_outer_field, $
+           rad_peak_field:rad_peak_field, $
            status:status_box, $
-           leftbargeom:leftbargeom $
+           leftbargeom:leftbargeom, $
+           single_rad_grid:0, $
+           flux_curv:0 $
          } 
 
   ; Store this in the base UVALUE
