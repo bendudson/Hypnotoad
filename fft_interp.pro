@@ -1,5 +1,10 @@
 ; Given the FFT of a function (from IDL's FFT routine), works out
 ; the value and derivative at any given x location
+;
+; See the test function for useage
+;
+; Ben Dudson, University of York
+;
 
 FUNCTION fft_interp, F, x, ddx=ddx
   n = N_ELEMENTS(F)

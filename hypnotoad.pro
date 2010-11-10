@@ -6,6 +6,25 @@
 ; Aims to allow tokamak grids to be easily generated from
 ; a variety of input sources.
 ;
+; Copyright 2010 B.D.Dudson (University of York)
+;
+; Contact Ben Dudson, bd512@york.ac.uk
+; 
+; This file is part of Hypnotoad.
+;
+; Hypnotoad is free software: you can redistribute it and/or modify
+; it under the terms of the GNU Lesser General Public License as published by
+; the Free Software Foundation, either version 3 of the License, or
+; (at your option) any later version.
+;
+; Hypnotoad is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU Lesser General Public License for more details.
+;
+; You should have received a copy of the GNU Lesser General Public License
+; along with Hypnotoad.  If not, see <http://www.gnu.org/licenses/>.
+; 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 PRO plot_region, R, Z, ymin, ymax, _extra=_extra

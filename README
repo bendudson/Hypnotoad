@@ -1,0 +1,73 @@
+                      Hypnotoad 
+                      =========
+
+A field-aligned structured mesh generator for tokamaks.
+
+Takes a G-EQDSK format input file (from e.g EFIT), and produces
+a mesh which can be used for simulation codes
+
+To run the code, go into IDL
+
+IDL> hypnotoad
+
+See the manual in doc/ for instructions
+
+License
+-------
+
+Copyright 2010 B.D.Dudson (University of York)
+
+Hypnotoad is free software: you can redistribute it and/or modify
+it under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Hypnotoad is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License
+along with Hypnotoad.  If not, see <http://www.gnu.org/licenses/>.
+
+A copy of the LGPL license is in COPYING.LESSER. Since this is based
+on (and refers to) the GPL, this is included in COPYING.
+
+Features
+--------
+
+Processing consists of the following steps
+
+ o Reading equilibria (read_neqdsk.pro)
+ o Analysing to find x-points and o-points (analyse_equil.pro)
+ o Creating a mesh (create_grid.pro)
+ o Processing the mesh to produce output for BOUT++ (process_grid.pro)
+
+Each of these files contains comments describing what their inputs
+and outputs are.
+
+All of these steps can be done automatically in a script (see test.pro)
+except for process_grid.pro currently. This is because often meshes
+from EFIT need to be adjusted first before they can be used, so processing
+currently needs some user interaction.
+
+For processing step: Answer "No" to all questions if in doubt.
+
+The hypnotoad GUI provides an interface, but doesn't do any processing
+so it's not needed. This is so everything can be automated if needed.
+
+The main feature is that the mesh generation tries to be very forgiving.
+If it comes across a problem in the settings, it will try to find better
+settings and retry. After a number of retries it will eventually give up.
+
+
+Limitations
+-----------
+
+o Currently only outputs for BOUT++, although adapting to other formats
+  should be possible. See the output of create_mesh.pro and see what
+  process_grid does with it
+
+o The mesh is currently only orthogonal. This means that it can't properly
+  conform to boundaries e.g. target plates. This is more difficult to
+  change, but is planned
