@@ -3,26 +3,6 @@
 ; 
 ; Takes a RZ psi grid, and finds x-points and o-points
 ; 
-; Copyright 2010 B.D.Dudson (University of York)
-;
-; Contact Ben Dudson, bd512@york.ac.uk
-; 
-; This file is part of Hypnotoad.
-;
-; Hypnotoad is free software: you can redistribute it and/or modify
-; it under the terms of the GNU Lesser General Public License as published by
-; the Free Software Foundation, either version 3 of the License, or
-; (at your option) any later version.
-;
-; Hypnotoad is distributed in the hope that it will be useful,
-; but WITHOUT ANY WARRANTY; without even the implied warranty of
-; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-; GNU Lesser General Public License for more details.
-;
-; You should have received a copy of the GNU Lesser General Public License
-; along with Hypnotoad.  If not, see <http://www.gnu.org/licenses/>.
-;
-;
 ; F - F(nr, nz) 2D array of psi values
 ; R - R(nr) 1D array of major radii
 ; Z - Z(nz) 1D array of heights
@@ -103,8 +83,8 @@ FUNCTION analyse_equil, F, R, Z
   ENDFOR
   
   ; Check for points too close to the edges
-  w = WHERE((rex GT 2) AND (rex LT nx-3) $
-            (zex GT 2) AND (zex LT nx-3), nextrema)
+  w = WHERE((rex GT 2) AND (rex LT nx-3) AND $
+            (zex GT 2) AND (zex LT ny-3), nextrema)
   
   rex = rex[w]
   zex = zex[w]
@@ -265,6 +245,11 @@ FUNCTION analyse_equil, F, R, Z
 
   PRINT, "Number of O-points: "+STR(n_opoint)
   PRINT, "Number of X-points: "+STR(n_xpoint)
+
+  IF n_opoint EQ 0 THEN BEGIN
+    PRINT, "No O-points! Giving up on this equilibrium"
+    RETURN, {n_opoint:0, n_xpoint:0, primary_opt:-1}
+  ENDIF
 
   ;;;;;;;;;;;;;;; Find plasma centre ;;;;;;;;;;;;;;;;;;;
   ; Find the O-point closest to the middle of the grid

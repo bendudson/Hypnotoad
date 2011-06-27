@@ -6,25 +6,6 @@
 ; Aims to allow tokamak grids to be easily generated from
 ; a variety of input sources.
 ;
-; Copyright 2010 B.D.Dudson (University of York)
-;
-; Contact Ben Dudson, bd512@york.ac.uk
-; 
-; This file is part of Hypnotoad.
-;
-; Hypnotoad is free software: you can redistribute it and/or modify
-; it under the terms of the GNU Lesser General Public License as published by
-; the Free Software Foundation, either version 3 of the License, or
-; (at your option) any later version.
-;
-; Hypnotoad is distributed in the hope that it will be useful,
-; but WITHOUT ANY WARRANTY; without even the implied warranty of
-; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-; GNU Lesser General Public License for more details.
-;
-; You should have received a copy of the GNU Lesser General Public License
-; along with Hypnotoad.  If not, see <http://www.gnu.org/licenses/>.
-; 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 PRO plot_region, R, Z, ymin, ymax, _extra=_extra
@@ -347,6 +328,61 @@ PRO event_handler, event
         WIDGET_CONTROL, info.status, set_value="  *** FAILED to generate mesh ***"
       ENDELSE
     END
+    'mesh2': BEGIN
+      ; Create a non-orthogonal mesh
+      IF info.rz_grid_valid EQ 0 THEN BEGIN
+        PRINT, "ERROR: No valid equilibrium data. Read from file first"
+        a = DIALOG_MESSAGE("No valid equilibrium data. Read from file first", /error)
+        RETURN
+      ENDIF
+
+      boundary = TRANSPOSE([[(*info.rz_grid).rlim], [(*info.rz_grid).zlim]])
+      
+      IF info.detail_set THEN BEGIN
+        settings = {dummy:0}
+      ENDIF ELSE BEGIN
+        ; Get settings
+        widget_control, info.nrad_field, get_value=nrad
+        widget_control, info.npol_field, get_value=npol
+
+        widget_control, info.psi_inner_field, get_value=psi_inner
+        widget_control, info.psi_outer_field, get_value=psi_outer
+
+        widget_control, info.rad_peak_field, get_value=rad_peak
+
+        settings = {nrad:nrad, npol:npol, psi_inner:psi_inner, psi_outer:psi_outer}
+      ENDELSE
+      
+
+      ; Check if a simplified boundary should be used
+      IF info.simple_bndry THEN BEGIN
+        ; Simplify the boundary to a square box
+        boundary = TRANSPOSE([ [MIN(boundary[0,*]), MAX(boundary[0,*]), $
+                                MAX(boundary[0,*]), MIN(boundary[0,*])], $
+                               [MIN(boundary[1,*]), MIN(boundary[1,*]), $
+                                MAX(boundary[1,*]), MAX(boundary[1,*])] ])
+      ENDIF
+        
+      WIDGET_CONTROL, info.status, set_value="Generating non-orthogonal mesh ..."
+      
+      mesh = create_nonorthogonal((*(info.rz_grid)).psi, (*(info.rz_grid)).r, (*(info.rz_grid)).z, settings, $
+                         boundary=boundary, strict=info.strict_bndry, rad_peaking=rad_peak, $
+                         /nrad_flexible, $
+                         single_rad_grid=info.single_rad_grid, $
+                         critical=(*(info.rz_grid)).critical)
+      IF mesh.error EQ 0 THEN BEGIN
+        PRINT, "Successfully generated non-orthogonal mesh"
+        WIDGET_CONTROL, info.status, set_value="Successfully generated mesh. All glory to the Hypnotoad!"
+        oplot_mesh, *info.rz_grid, mesh
+        
+        info.flux_mesh_valid = 1
+        info.flux_mesh = PTR_NEW(mesh)
+        widget_control, event.top, set_UVALUE=info
+      ENDIF ELSE BEGIN
+        a = DIALOG_MESSAGE("Could not generate non-orthogonal mesh", /error, dialog_parent=info.draw)
+        WIDGET_CONTROL, info.status, set_value="  *** FAILED to generate non-orthogonal mesh ***"
+      ENDELSE
+    END
     'process': BEGIN
       ; Process mesh to produce output
       PRINT, "Write output file"
@@ -360,13 +396,9 @@ PRO event_handler, event
 
       IF info.rz_grid_valid AND info.flux_mesh_valid THEN BEGIN
         
-        oldcurv = 1
-        IF info.flux_curv THEN oldcurv=0
-      
-        
         process_grid, *(info.rz_grid), *(info.flux_mesh), $
                       output=filename, poorquality=poorquality, /gui, parent=info.draw, $
-                      oldcurv=oldcurv
+                      curv=info.curv_ind, smoothpressure=info.smoothP
         
         IF poorquality THEN BEGIN
           r = DIALOG_MESSAGE("Poor quality equilibrium", dialog_parent=info.draw)
@@ -396,6 +428,11 @@ PRO event_handler, event
         WIDGET_CONTROL, info.status, set_value="  *** Need to generate mesh first ***"
       ENDELSE
     END
+    'curv': BEGIN
+      ; Combo box with curvature options
+      info.curv_ind = event.index
+      widget_control, event.top, set_UVALUE=info
+    END
     'strict': BEGIN
       ; Checkbox with boundary strictness
       info.strict_bndry = event.select
@@ -406,12 +443,12 @@ PRO event_handler, event
       info.simple_bndry = event.select
       widget_control, event.top, set_UVALUE=info
     END
-    'curv': BEGIN
-      info.flux_curv = event.select
-      widget_control, event.top, set_UVALUE=info
-    END
     'radgrid': BEGIN
       info.single_rad_grid = event.select
+      widget_control, event.top, set_UVALUE=info
+    END
+    'smoothP': BEGIN
+      info.smoothP = event.select
       widget_control, event.top, set_UVALUE=info
     END
     'draw': BEGIN
@@ -613,6 +650,52 @@ PRO event_handler, event
       WIDGET_CONTROL, popup, /real
       XMANAGER, 'popup', popup, /just_reg
     END
+    'save': BEGIN
+      filename = DIALOG_PICKFILE(dialog_parent=event.top, file="hypnotoad.idl", $
+                                 /write, /overwrite_prompt)
+      SAVE, info, file=filename
+      WIDGET_CONTROL, info.status, set_value="Saved state to "+filename
+    END
+    'restore': BEGIN
+      filename = DIALOG_PICKFILE(dialog_parent=event.top, file="hypnotoad.idl", /read)
+      IF STRLEN(filename) EQ 0 THEN BEGIN
+        WIDGET_CONTROL, info.status, set_value="   *** Cancelled restore ***"
+        RETURN
+      ENDIF
+      oldinfo = info
+      
+      CATCH, err
+      IF err NE 0 THEN BEGIN
+        WIDGET_CONTROL, info.status, set_value=!ERROR_STATE.MSG
+      ENDIF ELSE BEGIN
+
+        RESTORE, filename
+        
+        ; Copy the widget IDs
+        info.nrad_field = oldinfo.nrad_field
+        info.npol_field = oldinfo.npol_field
+        info.draw = oldinfo.draw
+        info.psi_inner_field = oldinfo.psi_inner_field
+        info.rad_peak_field = oldinfo.rad_peak_field
+        info.status = oldinfo.status
+        info.leftbargeom = oldinfo.leftbargeom
+        info.strict_bndry = oldinfo.strict_bndry
+        info.simple_bndry = oldinfo.simple_bndry
+        info.smoothP = oldinfo.smoothP
+        info.single_rad_grid = oldinfo.single_rad_grid
+        
+        IF info.rz_grid_valid THEN BEGIN
+          plot_rz_equil, *info.rz_grid
+        ENDIF
+        
+        IF info.flux_mesh_valid THEN BEGIN
+          oplot_mesh, *info.rz_grid, *info.flux_mesh
+        ENDIF
+        
+        widget_control, event.top, set_UVALUE=info
+        WIDGET_CONTROL, info.status, set_value="Restored state from "+filename
+      ENDELSE
+    END
     ELSE: PRINT, "Unknown event", uvalue
   ENDCASE
 END
@@ -709,6 +792,15 @@ PRO hypnotoad
                              value = 1,                    $
                              xsize=8                         $
                            )
+  
+  w = WIDGET_LABEL(bar, value="Curvature method")
+  curv_select = WIDGET_COMBOBOX(bar, VALUE=["Toroidal, SVD method", $
+                                            "Cylindrical+interpol", $
+                                            "Field-aligned coords"], $
+                                EVENT_PRO = 'event_handler', $
+                                UVALUE="curv")
+  curv_index = 1 ; Default index
+  WIDGET_CONTROL, curv_select, set_combobox_select=curv_index
 
   checkboxbase = WIDGET_BASE(bar, /COLUMN, EVENT_PRO = 'event_handler', /NonExclusive)
   strict_check = WIDGET_BUTTON(checkboxbase, VALUE="Strict boundaries", uvalue='strict', $
@@ -718,17 +810,21 @@ PRO hypnotoad
   simple_check = WIDGET_BUTTON(checkboxbase, VALUE="Simplify boundary", uvalue='simplebndry', $
                                tooltip="Simplify the boundary to a square")
   Widget_Control, simple_check, Set_Button=0
-
-  curv_check = WIDGET_BUTTON(checkboxbase, VALUE="Flux curvature", uvalue='curv', $
-                             tooltip="Calculate curvature in flux coordinates")
-  Widget_Control, curv_check, Set_Button=0
   
   radgrid_check = WIDGET_BUTTON(checkboxbase, VALUE="Single radial grid", uvalue='radgrid', $
                              tooltip="Grid radially in one")
-  Widget_Control, radgrid_check, Set_Button=0
+  Widget_Control, radgrid_check, Set_Button=1
 
+  smoothP_check = WIDGET_BUTTON(checkboxbase, VALUE="Smooth pressure", uvalue='smoothP', $
+                                tooltip="Interpolate P to smooth derivative")
+  
+  Widget_Control, smoothP_check, Set_Button=1
+  
   mesh_button = WIDGET_BUTTON(bar, VALUE='Generate mesh', $
                               uvalue='mesh', tooltip="Generate a new mesh")
+
+  mesh2_button = WIDGET_BUTTON(bar, VALUE='Nonorthogonal mesh', $
+                              uvalue='mesh2', tooltip="Generate a new nonorthogonal mesh")
   
   detail_button = WIDGET_BUTTON(bar, VALUE='Detailed settings', $
                                 uvalue='detail', $
@@ -739,6 +835,11 @@ PRO hypnotoad
 
   print_button = WIDGET_BUTTON(bar, VALUE='Plot to file', $
                                uvalue='print', tooltip="Produce a Postscript plot of the mesh")
+
+  save_button = WIDGET_BUTTON(bar, VALUE='Save state', $
+                               uvalue='save', tooltip="Save current Hypnotoad state")
+  restore_button = WIDGET_BUTTON(bar, VALUE='Restore state', $
+                               uvalue='restore', tooltip="Restore Hypnotoad state")
 
   leftbargeom = WIDGET_INFO(bar, /Geometry)
 
@@ -766,12 +867,13 @@ PRO hypnotoad
            detail_set:0, $ ; 1 if using detailed settings
            strict_bndry:1, $ ; 1 if boundaries should be strict
            simple_bndry:0, $ ; Use simplified boundary?
+           smoothP:1, $     ; Interpolate to make P smooth
+           single_rad_grid:1, $
            psi_inner_field:psi_inner_field, psi_outer_field:psi_outer_field, $
            rad_peak_field:rad_peak_field, $
            status:status_box, $
            leftbargeom:leftbargeom, $
-           single_rad_grid:0, $
-           flux_curv:0 $
+           curv_ind:curv_index $
          } 
 
   ; Store this in the base UVALUE
